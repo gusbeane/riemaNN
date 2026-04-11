@@ -2,6 +2,11 @@
 
 All functions take an explicit `out_path: Path` — the caller is
 responsible for resolving where files go (typically via `paths.plot_path`).
+
+Forces the Agg backend at import time so that experiment scripts work
+in non-interactive environments (sandboxed CLI runs, CI, SSH without
+X forwarding). Notebooks should import plotting lazily after setting
+up the notebook backend, or simply call the plot functions in cells.
 """
 
 from __future__ import annotations
@@ -9,14 +14,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import matplotlib
-import matplotlib.pyplot as plt
-import numpy as np
-from matplotlib.colors import TwoSlopeNorm
+
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+from matplotlib.colors import TwoSlopeNorm  # noqa: E402
 
 
-def _maybe_show(fig) -> None:
-    if matplotlib.get_backend().lower() != "agg":
-        plt.show()
+def _close(fig) -> None:
     plt.close(fig)
 
 
@@ -39,7 +45,7 @@ def plot_loss(
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    _maybe_show(fig)
+    _close(fig)
 
 
 def plot_slice(
@@ -86,7 +92,7 @@ def plot_slice(
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    _maybe_show(fig)
+    _close(fig)
 
 
 def plot_compare_loss(
@@ -125,7 +131,7 @@ def plot_compare_loss(
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    _maybe_show(fig)
+    _close(fig)
 
 
 def plot_compare_slice(
@@ -191,4 +197,4 @@ def plot_compare_slice(
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
-    _maybe_show(fig)
+    _close(fig)
