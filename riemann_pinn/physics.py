@@ -74,6 +74,20 @@ def find_ustar(gas_state, pstar):
     return 0.5 * (fR - fL)
 
 
+@jax.jit
+def two_rarefaction_p0(gas_state):
+    """Two-rarefaction approximation for p* (Toro eq. 4.46)."""
+    rhoL, pL, rhoR, pR, uRL = gas_state
+    cL = jnp.sqrt(GAMMA * pL / rhoL)
+    cR = jnp.sqrt(GAMMA * pR / rhoR)
+    numerator = jnp.maximum(cL + cR - MU * uRL, 1e-30)
+    denominator = cL / pL**ALPHA + cR / pR**ALPHA
+    return (numerator / denominator) ** (1.0 / ALPHA)
+
+
+two_rarefaction_p0_batch = jax.vmap(two_rarefaction_p0)
+
+
 def gas_log_to_phys(gas_states_log):
     """(batch, 5) log10(rhoL,pL,rhoR,pR) + uRL -> physical (rhoL,pL,rhoR,pR,uRL)."""
     return jnp.concatenate(

@@ -18,8 +18,9 @@ LBFGS_BATCH = 4096
 LBFGS_MEMORY = 10
 
 
-def adam_then_lbfgs(
+def adam_then_lbfgs_with_loss_fn(
     exp,
+    loss_fn,
     *,
     adam_epochs=ADAM_EPOCHS,
     adam_batch=ADAM_BATCH,
@@ -28,8 +29,7 @@ def adam_then_lbfgs(
     lbfgs_batch=LBFGS_BATCH,
     lbfgs_memory=LBFGS_MEMORY,
 ):
-    """Two-phase training: Adam warm-start, then L-BFGS polish."""
-    loss_fn = losses.make_loss_fn(exp.target, exp.loss_impl, **exp.loss_kwargs)
+    """Two-phase training with a pre-built loss_fn closure."""
     rng = jr.PRNGKey(exp.seed)
 
     # Phase 1: Adam
@@ -61,3 +61,9 @@ def adam_then_lbfgs(
     )
 
     return state, jnp.concatenate([trace_adam, trace_lbfgs])
+
+
+def adam_then_lbfgs(exp, **kwargs):
+    """Two-phase training: Adam warm-start, then L-BFGS polish."""
+    loss_fn = losses.make_loss_fn(exp.target, exp.loss_impl, **exp.loss_kwargs)
+    return adam_then_lbfgs_with_loss_fn(exp, loss_fn, **kwargs)

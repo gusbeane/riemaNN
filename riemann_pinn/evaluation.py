@@ -41,6 +41,15 @@ def evaluate_holdout(
         metrics[f"median_abs_{name}"] = float(jnp.median(abs_r))
         metrics[f"p95_abs_{name}"] = float(jnp.percentile(abs_r, 95.0))
 
+    # Newton-step metric: |f/f'| approximates |delta p|
+    if "fstar" in residuals and "pstar" in preds:
+        dfstar_vals = jax.vmap(physics.dfstar_dp)(preds["pstar"], gas_states_phys)
+        safe_df = jnp.where(jnp.abs(dfstar_vals) > 1e-20, dfstar_vals,
+                            jnp.sign(dfstar_vals + 1e-30) * 1e-20)
+        newton_steps = jnp.abs(residuals["fstar"] / safe_df)
+        metrics["median_abs_newton_step"] = float(jnp.median(newton_steps))
+        metrics["p95_abs_newton_step"] = float(jnp.percentile(newton_steps, 95.0))
+
     # Pressure-error metrics require a pstar prediction and the exact solver.
     if "pstar" in preds:
         pstar_nn = preds["pstar"]

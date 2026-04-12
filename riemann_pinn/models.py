@@ -12,7 +12,9 @@ from __future__ import annotations
 from typing import Any, Callable
 
 import flax.linen as nn
+import jax.numpy as jnp
 
+from . import physics
 from .physics import GAS_STATE_DIM
 
 
@@ -35,8 +37,64 @@ class StarPressureMLP(nn.Module):
         return x
 
 
+class TwoRarefactionMLP(nn.Module):
+    """MLP with two-rarefaction p0 appended as 6th input.
+
+    Accepts (B, 5) log-space gas state, computes log10(p0) internally,
+    and passes (B, 6) to an inner MLP. External interface is unchanged.
+    """
+
+    width: int = 256
+    depth: int = 3
+    activation: Callable = nn.silu
+    output_dim: int = 1
+
+    @nn.compact
+    def __call__(self, x):
+        gas_phys = physics.gas_log_to_phys(x)
+        p0 = physics.two_rarefaction_p0_batch(gas_phys)
+        log_p0 = jnp.log10(jnp.maximum(p0, 1e-30))
+        x_aug = jnp.concatenate([x, log_p0[:, None]], axis=-1)
+        for _ in range(self.depth):
+            x_aug = nn.Dense(self.width)(x_aug)
+            x_aug = self.activation(x_aug)
+        x_aug = nn.Dense(self.output_dim)(x_aug)
+        if self.output_dim == 1:
+            x_aug = x_aug.squeeze(-1)
+        return x_aug
+
+
+class SymmetricMLP(nn.Module):
+    """MLP that enforces Riemann L/R symmetry by construction.
+
+    Output = 0.5 * (g(qL, qR, uRL) + g(qR, qL, -uRL))
+    where g is a shared StarPressureMLP sub-module.
+    """
+
+    width: int = 256
+    depth: int = 3
+    activation: Callable = nn.silu
+    output_dim: int = 1
+
+    @nn.compact
+    def __call__(self, x):
+        inner = StarPressureMLP(
+            width=self.width,
+            depth=self.depth,
+            activation=self.activation,
+            output_dim=self.output_dim,
+            name="inner",
+        )
+        x_swap = jnp.concatenate(
+            [x[:, 2:4], x[:, 0:2], -x[:, 4:5]], axis=-1
+        )
+        return 0.5 * (inner(x) + inner(x_swap))
+
+
 MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "star_pressure_mlp": StarPressureMLP,
+    "two_rarefaction_mlp": TwoRarefactionMLP,
+    "symmetric_mlp": SymmetricMLP,
 }
 
 

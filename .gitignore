@@ -4,8 +4,5 @@ __pycache__/
 *.png
 *.msgpack
 *.npy
-outputs/*/config.json
-outputs/*/metrics.json
-outputs/*/plots/
-outputs/summary.txt
+outputs/
 .DS_Store
