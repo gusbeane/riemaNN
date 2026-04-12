@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import time as _time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
@@ -100,10 +101,13 @@ class Experiment:
         self._write_config_snapshot(config)
 
         ckpt = paths.checkpoint_path(self.name)
+        training_time_s = None
         if ckpt.is_file() and not force_retrain:
             state, loss_trace = self._load_existing()
         else:
+            t0 = _time.monotonic()
             state, loss_trace = train_fn(self)
+            training_time_s = _time.monotonic() - t0
             training.save_checkpoint(ckpt, state)
             if loss_trace is not None:
                 training.save_loss_trace(
@@ -111,6 +115,8 @@ class Experiment:
                 )
 
         metrics = self._evaluate(state)
+        if training_time_s is not None:
+            metrics["training_time_s"] = round(training_time_s, 1)
         with paths.metrics_path(self.name).open("w") as f:
             json.dump(metrics, f, indent=2, sort_keys=True)
         print(evaluation.format_metrics(metrics, prefix=f"[{self.name}]"))

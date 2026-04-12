@@ -23,6 +23,7 @@ _METRIC_COLS = [
     ("med rel",         "median_rel_abs_p_err"),
     ("p95 rel",         "p95_rel_abs_p_err"),
     ("frac p>0",        "frac_both_p_positive"),
+    ("train(s)",        "training_time_s"),
 ]
 
 # Config fields used for the sort key (group similar experiments together).
@@ -58,9 +59,11 @@ def _sort_key(entry: dict) -> tuple:
     return tuple(parts)
 
 
-def _fmt(val: float | None, width: int) -> str:
+def _fmt(val: float | None, width: int, key: str = "") -> str:
     if val is None:
         return "-".center(width)
+    if key == "training_time_s":
+        return f"{val:.0f}".rjust(width)
     if abs(val) >= 1.0 or val == 0.0:
         return f"{val:.3f}".rjust(width)
     return f"{val:.2e}".rjust(width)
@@ -147,7 +150,7 @@ def _build_section(entries: list[dict], title: str) -> list[str]:
         row = display_name.ljust(name_w) + "  " + _config_summary(entry["config"]).ljust(cfg_w)
         for _, key in _METRIC_COLS:
             val = entry["metrics"].get(key)
-            row += "  " + _fmt(val, col_w)
+            row += "  " + _fmt(val, col_w, key=key)
         lines.append(row)
 
     return lines
@@ -162,6 +165,7 @@ Column definitions:
   med rel    — median |p_NN − p_true| / |p_true| (relative pressure error)
   p95 rel    — 95th percentile relative pressure error
   frac p>0   — fraction of holdout samples where both p_NN and p_true are positive
+  train(s)   — wall-clock training time in seconds (blank for runs before timing was added)
 """
 
 
