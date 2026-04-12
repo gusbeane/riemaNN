@@ -1,4 +1,4 @@
-"""Fiducial model: Adam (10k) -> L-BFGS (1k) polish, w256 d3."""
+"""Adam (5k) -> L-BFGS (500) polish, w256 d2."""
 
 import jax
 
@@ -8,20 +8,20 @@ from riemann_pinn import Experiment, losses, models, samplers, targets
 from experiments._adam_lbfgs import adam_then_lbfgs
 
 exp = Experiment(
-    name="al_w256_d3",
-    model=models.StarPressureMLP(width=256, depth=3),
+    name="archive/al_w256_d2",
+    model=models.StarPressureMLP(width=256, depth=2),
     target=targets.STAR_PRESSURE_LOG10,
     sampler=samplers.uniform_log,
     loss_impl=losses.residual_loss,
     optimizer={"type": "lbfgs", "memory_size": 10},
-    n_epochs=11_000,
+    n_epochs=5500,
     batch_size=4096,
     seed=42,
 )
 
 
 def train(exp_):
-    return adam_then_lbfgs(exp_, adam_epochs=10_000, lbfgs_epochs=1_000)
+    return adam_then_lbfgs(exp_, )
 
 
 if __name__ == "__main__":

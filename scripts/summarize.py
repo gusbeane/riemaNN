@@ -85,58 +85,93 @@ def _config_summary(cfg: dict) -> str:
     return " ".join(parts)
 
 
-def collect_entries() -> list[dict]:
-    """Gather metrics + config from every experiment that has both files."""
+def collect_entries(root: Path = paths.OUTPUTS_ROOT) -> list[dict]:
+    """Gather metrics + config from every experiment that has metrics.json.
+
+    Searches both `outputs/*/metrics.json` (active) and
+    `outputs/archive/*/metrics.json` (archived).
+    """
     entries = []
-    for metrics_file in sorted(paths.OUTPUTS_ROOT.glob("*/metrics.json")):
-        exp_dir = metrics_file.parent
-        config_file = exp_dir / "config.json"
-        name = exp_dir.name
-        if name.startswith("_"):
-            continue
-        try:
-            metrics = json.loads(metrics_file.read_text())
-        except (json.JSONDecodeError, OSError):
-            continue
-        config = {}
-        if config_file.is_file():
+    # Search both top-level and archive/ subdirectory
+    globs = [root.glob("*/metrics.json"), root.glob("archive/*/metrics.json")]
+    for pattern in globs:
+        for metrics_file in sorted(pattern):
+            exp_dir = metrics_file.parent
+            config_file = exp_dir / "config.json"
+            # Build the name relative to outputs root
+            rel = exp_dir.relative_to(root)
+            name = str(rel)
+            if name.startswith("_"):
+                continue
             try:
-                config = json.loads(config_file.read_text())
+                metrics = json.loads(metrics_file.read_text())
             except (json.JSONDecodeError, OSError):
-                pass
-        entries.append({"name": name, "metrics": metrics, "config": config})
+                continue
+            config = {}
+            if config_file.is_file():
+                try:
+                    config = json.loads(config_file.read_text())
+                except (json.JSONDecodeError, OSError):
+                    pass
+            entries.append({"name": name, "metrics": metrics, "config": config})
     return entries
 
 
-def build_table(entries: list[dict]) -> str:
-    """Format entries into a fixed-width text table."""
+def _build_section(entries: list[dict], title: str) -> list[str]:
+    """Format a group of entries into header + rows."""
     if not entries:
-        return "(no experiments found)\n"
+        return []
 
     entries.sort(key=_sort_key)
 
-    col_w = 10  # width per metric column
+    col_w = 10
     name_w = max(len(e["name"]) for e in entries)
     cfg_w = max(len(_config_summary(e["config"])) for e in entries)
 
-    # Header
     lines: list[str] = []
+    if title:
+        lines.append(f"## {title}")
+        lines.append("")
+
     hdr = "name".ljust(name_w) + "  " + "config".ljust(cfg_w)
     for label, _ in _METRIC_COLS:
         hdr += "  " + label.rjust(col_w)
     lines.append(hdr)
     lines.append("-" * len(hdr))
 
-    # Rows
     for entry in entries:
-        row = entry["name"].ljust(name_w) + "  " + _config_summary(entry["config"]).ljust(cfg_w)
+        # Strip archive/ prefix from display name for cleaner output
+        display_name = entry["name"]
+        if display_name.startswith("archive/"):
+            display_name = display_name[len("archive/"):]
+        row = display_name.ljust(name_w) + "  " + _config_summary(entry["config"]).ljust(cfg_w)
         for _, key in _METRIC_COLS:
             val = entry["metrics"].get(key)
             row += "  " + _fmt(val, col_w)
         lines.append(row)
 
+    return lines
+
+
+def build_table(entries: list[dict]) -> str:
+    """Format entries into a fixed-width text table with active/archived sections."""
+    if not entries:
+        return "(no experiments found)\n"
+
+    active = [e for e in entries if not e["name"].startswith("archive/")]
+    archived = [e for e in entries if e["name"].startswith("archive/")]
+
+    lines: list[str] = []
+    lines.extend(_build_section(active, "Active experiments"))
+
+    if archived:
+        lines.append("")
+        lines.append("")
+        lines.extend(_build_section(archived, f"Archived experiments ({len(archived)})"))
+
+    total = len(active) + len(archived)
     lines.append("")
-    lines.append(f"{len(entries)} experiments")
+    lines.append(f"{total} experiments ({len(active)} active, {len(archived)} archived)")
     return "\n".join(lines) + "\n"
 
 
