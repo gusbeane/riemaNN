@@ -71,7 +71,28 @@ class Experiment:
     def run(
         self, *, force_retrain: bool = False, skip_plots: bool = False
     ) -> ExperimentResult:
-        exp_dir = paths.experiment_dir(self.name)
+        """Train (if no checkpoint) or load, then evaluate and plot."""
+        return self.run_custom(
+            self._default_train_fn,
+            force_retrain=force_retrain,
+            skip_plots=skip_plots,
+        )
+
+    def run_custom(
+        self,
+        train_fn: Callable[["Experiment"], tuple[Any, Any]],
+        *,
+        force_retrain: bool = False,
+        skip_plots: bool = False,
+    ) -> ExperimentResult:
+        """Like `run`, but the caller supplies the training function.
+
+        `train_fn(exp) -> (state, loss_trace)` is responsible for building
+        its own train state and running however many training phases it
+        wants. The Experiment handles config snapshot, checkpoint reuse,
+        save-on-success, evaluation, metrics, and plots.
+        """
+        paths.experiment_dir(self.name)
         config = self._resolve_config()
         self._write_config_snapshot(config)
 
@@ -79,7 +100,12 @@ class Experiment:
         if ckpt.is_file() and not force_retrain:
             state, loss_trace = self._load_existing()
         else:
-            state, loss_trace = self._train_fresh()
+            state, loss_trace = train_fn(self)
+            training.save_checkpoint(ckpt, state)
+            if loss_trace is not None:
+                training.save_loss_trace(
+                    paths.loss_trace_path(self.name), loss_trace
+                )
 
         metrics = self._evaluate(state)
         with paths.metrics_path(self.name).open("w") as f:
@@ -168,24 +194,28 @@ class Experiment:
             rng, self.model, optimizer, batch_size_hint=self.batch_size
         )
 
-    def _train_fresh(self):
-        state = self._build_template_state()
+    def _default_train_fn(self, exp: "Experiment"):
+        """Default single-phase training function used by `run()`.
+
+        `exp` is always `self`; the parameter exists so `_default_train_fn`
+        matches the `(exp) -> (state, loss_trace)` signature of a custom
+        train function and can be passed to `run_custom`.
+        """
+        state = exp._build_template_state()
         loss_fn = losses.make_loss_fn(
-            self.target, self.loss_impl, **self.loss_kwargs
+            exp.target, exp.loss_impl, **exp.loss_kwargs
         )
         train_step = training.make_train_step(loss_fn)
-        training_rng = jr.fold_in(jr.PRNGKey(self.seed), 1)
+        training_rng = jr.fold_in(jr.PRNGKey(exp.seed), 1)
         state, loss_trace = training.run_training_loop(
             state,
             train_step,
-            self.sampler,
+            exp.sampler,
             training_rng,
-            n_epochs=self.n_epochs,
-            batch_size=self.batch_size,
-            desc=self.name,
+            n_epochs=exp.n_epochs,
+            batch_size=exp.batch_size,
+            desc=exp.name,
         )
-        training.save_checkpoint(paths.checkpoint_path(self.name), state)
-        training.save_loss_trace(paths.loss_trace_path(self.name), loss_trace)
         return state, loss_trace
 
     def _load_existing(self):
