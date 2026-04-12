@@ -153,6 +153,18 @@ def _build_section(entries: list[dict], title: str) -> list[str]:
     return lines
 
 
+_LEGEND = """\
+Column definitions:
+  med |f|    — median absolute fstar residual (should be 0 at true p*)
+  p95 |f|    — 95th percentile absolute fstar residual
+  med |Δlgp| — median |log10(p_NN) − log10(p_true)| (log-scale pressure error)
+  p95 |Δlgp| — 95th percentile log-scale pressure error
+  med rel    — median |p_NN − p_true| / |p_true| (relative pressure error)
+  p95 rel    — 95th percentile relative pressure error
+  frac p>0   — fraction of holdout samples where both p_NN and p_true are positive
+"""
+
+
 def build_table(entries: list[dict]) -> str:
     """Format entries into a fixed-width text table with active/archived sections."""
     if not entries:
@@ -161,7 +173,7 @@ def build_table(entries: list[dict]) -> str:
     active = [e for e in entries if not e["name"].startswith("archive/")]
     archived = [e for e in entries if e["name"].startswith("archive/")]
 
-    lines: list[str] = []
+    lines: list[str] = [_LEGEND]
     lines.extend(_build_section(active, "Active experiments"))
 
     if archived:
