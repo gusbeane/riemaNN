@@ -95,6 +95,76 @@ def plot_slice(
     _close(fig)
 
 
+def plot_log_ratio_hist(
+    log_ratio: np.ndarray,
+    out_path: Path,
+    *,
+    title: str = "",
+    bins: int = 100,
+    range_sigma: float = 5.0,
+) -> None:
+    """Histogram of log10(p_NN / p_true) for a single experiment."""
+    arr = np.asarray(log_ratio).ravel()
+    arr = arr[np.isfinite(arr)]
+    med = float(np.median(arr))
+    std = float(np.std(arr))
+    lo = med - range_sigma * max(std, 0.01)
+    hi = med + range_sigma * max(std, 0.01)
+
+    fig, ax = plt.subplots(1, 1, figsize=(8, 4))
+    ax.hist(arr, bins=bins, range=(lo, hi), density=True, alpha=0.7, edgecolor="black", linewidth=0.3)
+    ax.axvline(0, color="k", linestyle="--", linewidth=0.8, alpha=0.5)
+    ax.set_yscale("log")
+    ax.set_xlabel(r"$\log_{10}(p^*_{\mathrm{NN}} / p^*_{\mathrm{true}})$")
+    ax.set_ylabel("density")
+    if title:
+        ax.set_title(title)
+    ax.grid(True, alpha=0.3)
+    plt.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    _close(fig)
+
+
+def plot_compare_log_ratio_hist(
+    labels: list[str],
+    log_ratios: list[np.ndarray],
+    out_path: Path,
+    *,
+    bins: int = 100,
+    range_sigma: float = 5.0,
+) -> None:
+    """Stacked histograms of log10(p_NN/p_true), one row per experiment."""
+    n = len(labels)
+    fig, axes = plt.subplots(n, 1, figsize=(8, 2.5 * n), sharex=True)
+    if n == 1:
+        axes = [axes]
+
+    # Compute shared x range from all data
+    all_vals = np.concatenate([np.asarray(lr).ravel() for lr in log_ratios])
+    all_vals = all_vals[np.isfinite(all_vals)]
+    med = float(np.median(all_vals))
+    std = float(np.std(all_vals))
+    lo = med - range_sigma * max(std, 0.01)
+    hi = med + range_sigma * max(std, 0.01)
+
+    for ax, label, lr in zip(axes, labels, log_ratios):
+        arr = np.asarray(lr).ravel()
+        arr = arr[np.isfinite(arr)]
+        ax.hist(arr, bins=bins, range=(lo, hi), density=True, alpha=0.7, edgecolor="black", linewidth=0.3)
+        ax.axvline(0, color="k", linestyle="--", linewidth=0.8, alpha=0.5)
+        ax.set_yscale("log")
+        ax.set_ylabel("density")
+        ax.set_title(label)
+        ax.grid(True, alpha=0.3)
+
+    axes[-1].set_xlabel(r"$\log_{10}(p^*_{\mathrm{NN}} / p^*_{\mathrm{true}})$")
+    plt.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    _close(fig)
+
+
 def plot_compare_loss(
     labels: list[str],
     loss_traces: list,

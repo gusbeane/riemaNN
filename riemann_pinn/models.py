@@ -64,6 +64,34 @@ class TwoRarefactionMLP(nn.Module):
         return x_aug
 
 
+class GuessInputMLP(nn.Module):
+    """MLP with an external guess appended as 6th input.
+
+    Like TwoRarefactionMLP, but the guess is provided by an arbitrary
+    callable ``guess_fn(gas_states_log) -> (B,)`` (log-space prediction).
+    Use this to chain a pretrained network's predictions as input to a
+    second network.
+    """
+
+    guess_fn: Callable  # (B, 5) log-space -> (B,) log-space guess
+    width: int = 256
+    depth: int = 3
+    activation: Callable = nn.silu
+    output_dim: int = 1
+
+    @nn.compact
+    def __call__(self, x):
+        log_guess = self.guess_fn(x)
+        x_aug = jnp.concatenate([x, log_guess[:, None]], axis=-1)
+        for _ in range(self.depth):
+            x_aug = nn.Dense(self.width)(x_aug)
+            x_aug = self.activation(x_aug)
+        x_aug = nn.Dense(self.output_dim)(x_aug)
+        if self.output_dim == 1:
+            x_aug = x_aug.squeeze(-1)
+        return x_aug
+
+
 class SymmetricMLP(nn.Module):
     """MLP that enforces Riemann L/R symmetry by construction.
 
@@ -94,8 +122,12 @@ class SymmetricMLP(nn.Module):
 MODEL_REGISTRY: dict[str, type[nn.Module]] = {
     "star_pressure_mlp": StarPressureMLP,
     "two_rarefaction_mlp": TwoRarefactionMLP,
+    "guess_input_mlp": GuessInputMLP,
     "symmetric_mlp": SymmetricMLP,
 }
+
+# Fields that are not JSON-serializable and should be skipped in model_spec.
+_SPEC_SKIP_FIELDS = {"parent", "name", "guess_fn"}
 
 
 def model_spec(model: nn.Module) -> dict[str, Any]:
@@ -113,7 +145,7 @@ def model_spec(model: nn.Module) -> dict[str, Any]:
     spec: dict[str, Any] = {"type": name}
     # Only include JSON-safe fields; skip activation (a callable) unless it is nn.silu etc.
     for field in type(model).__dataclass_fields__:  # type: ignore[attr-defined]
-        if field in ("parent", "name"):
+        if field in _SPEC_SKIP_FIELDS:
             continue
         value = getattr(model, field)
         if callable(value):

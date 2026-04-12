@@ -72,6 +72,26 @@ def evaluate_holdout(
     return metrics
 
 
+def holdout_log_ratio(
+    state,
+    target: Target,
+    n_samples: int = 20_000,
+    seed: int = 999,
+) -> np.ndarray:
+    """Compute log10(p_NN / p_true) on a holdout batch. Returns (n_samples,) numpy array."""
+    rng = jr.PRNGKey(seed)
+    gas_states_log = uniform_log(rng, n_samples)
+    gas_states_phys = physics.gas_log_to_phys(gas_states_log)
+
+    raw_out = state.apply_fn({"params": state.params}, gas_states_log)
+    preds = target.decode(gas_states_log, raw_out)
+    pstar_nn = preds["pstar"]
+    pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states_phys)
+
+    log_ratio = jnp.log10(jnp.maximum(pstar_nn, 1e-30)) - jnp.log10(jnp.maximum(pstar_true, 1e-30))
+    return np.asarray(log_ratio)
+
+
 def format_metrics(metrics: dict, prefix: str = "") -> str:
     """Pretty one-line summary for console output."""
     parts = [prefix] if prefix else []
