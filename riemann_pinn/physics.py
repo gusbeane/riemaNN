@@ -43,15 +43,8 @@ dfstar_dp = jax.grad(fstar, argnums=0)
 
 
 @jax.jit
-def find_pstar(gas_state, p0=None):
-    """Newton iteration for p*; returns (pstar, final residual).
-
-    If p0 is None (default), the two-rarefaction approximation is used
-    as the initial guess, which converges for a much wider range of
-    input states than the old fixed p0=1.0 default.
-    """
-    if p0 is None:
-        p0 = two_rarefaction_p0(gas_state)
+def _newton(gas_state, p0):
+    """Newton iteration for p*. Fast but can diverge."""
 
     def cond(state):
         pstar, fstar_, i = state
@@ -67,6 +60,86 @@ def find_pstar(gas_state, p0=None):
     init = (p0, fstar(p0, gas_state), 0)
     pstar, fstar_final, _ = jax.lax.while_loop(cond, body, init)
     return pstar, fstar_final
+
+
+@jax.jit
+def _bisect(gas_state):
+    """Bisection solver for p*. Slow but guaranteed to converge.
+
+    Vacuum states (no physical root) return a very small p* with a
+    non-zero residual.
+    """
+    p_guess = jnp.maximum(two_rarefaction_p0(gas_state), 1e-30)
+
+    # --- 1. Bracket p* around the guess ---
+    p_lo = p_guess * 0.5
+    p_hi = p_guess * 2.0
+    f_lo = fstar(p_lo, gas_state)
+    f_hi = fstar(p_hi, gas_state)
+
+    # Widen until signs differ or we hit the iteration limit.
+    # fstar is monotonically increasing, so we lower p_lo when
+    # f_lo > 0 and raise p_hi when f_hi < 0.
+    def widen_cond(state):
+        _p_lo, _p_hi, _f_lo, _f_hi, i = state
+        return (_f_lo * _f_hi > 0) & (i < 60)
+
+    def widen_body(state):
+        _p_lo, _p_hi, _f_lo, _f_hi, i = state
+        _p_lo = jnp.where(_f_lo > 0, jnp.maximum(_p_lo * 0.01, 1e-30), _p_lo)
+        _p_hi = jnp.where(_f_hi < 0, _p_hi * 100.0, _p_hi)
+        return (_p_lo, _p_hi,
+                fstar(_p_lo, gas_state), fstar(_p_hi, gas_state), i + 1)
+
+    p_lo, p_hi, f_lo, f_hi, _ = jax.lax.while_loop(
+        widen_cond, widen_body, (p_lo, p_hi, f_lo, f_hi, 0)
+    )
+
+    # --- 2–3. Bisect to convergence ---
+    def bisect_cond(state):
+        _p_lo, _p_hi, i = state
+        p_mid = 0.5 * (_p_lo + _p_hi)
+        return ((_p_hi - _p_lo) > 1e-12 * jnp.maximum(p_mid, 1e-30)) & (i < 200)
+
+    def bisect_body(state):
+        _p_lo, _p_hi, i = state
+        p_mid = 0.5 * (_p_lo + _p_hi)
+        f_mid = fstar(p_mid, gas_state)
+        # fstar is monotonically increasing: f < 0 means p too low
+        _p_lo = jnp.where(f_mid < 0, p_mid, _p_lo)
+        _p_hi = jnp.where(f_mid >= 0, p_mid, _p_hi)
+        return _p_lo, _p_hi, i + 1
+
+    p_lo, p_hi, _ = jax.lax.while_loop(
+        bisect_cond, bisect_body, (p_lo, p_hi, 0)
+    )
+
+    p_result = 0.5 * (p_lo + p_hi)
+    f_result = fstar(p_result, gas_state)
+    return p_result, f_result
+
+
+@jax.jit
+def find_pstar(gas_state):
+    """Find p* via Newton with bisection fallback; returns (pstar, residual).
+
+    Tries Newton iteration first (fast, ~5-10 steps).  If Newton fails
+    to converge or produces a non-finite / non-positive result, falls
+    back to the guaranteed-convergent bisection solver.
+    """
+    p0 = jnp.maximum(two_rarefaction_p0(gas_state), 1e-30)
+    p_newton, f_newton = _newton(gas_state, p0)
+
+    newton_ok = (jnp.isfinite(p_newton) & jnp.isfinite(f_newton)
+                 & (p_newton > 0) & (jnp.abs(f_newton) < 1e-6))
+
+    p_bisect, f_bisect = jax.lax.cond(
+        newton_ok,
+        lambda _: (p_newton, f_newton),
+        lambda _: _bisect(gas_state),
+        None,
+    )
+    return p_bisect, f_bisect
 
 
 @jax.jit
