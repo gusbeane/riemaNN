@@ -55,7 +55,10 @@ class Experiment:
     loss_impl: losses.LossFn
 
     loss_kwargs: dict[str, Any] = field(default_factory=dict)
-    optimizer: dict[str, Any] = field(
+    # Dict is the full optax spec for `training.build_optimizer`. A bare callable
+    # (e.g. `optax.cosine_decay_schedule(...)`) is accepted as shorthand for Adam
+    # with that learning-rate schedule.
+    optimizer: dict[str, Any] | Callable[..., Any] = field(
         default_factory=lambda: {"type": "adam", "learning_rate": 1e-3}
     )
     n_epochs: int = 5_000
@@ -174,15 +177,31 @@ class Experiment:
 
     # --- private helpers ------------------------------------------------------
 
+    def _optimizer_spec_dict(self) -> dict[str, Any]:
+        """Return a spec dict suitable for `training.build_optimizer`."""
+        opt = self.optimizer
+        if isinstance(opt, dict):
+            return dict(opt)
+        if callable(opt):
+            return {"type": "adam", "learning_rate": opt}
+        raise TypeError(
+            "optimizer must be a dict (optimizer spec) or a callable "
+            f"learning-rate schedule; got {type(opt).__name__}"
+        )
+
     def _resolve_config(self) -> dict[str, Any]:
         """Build the JSON-serializable config snapshot."""
+        opt_config = dict(self._optimizer_spec_dict())
+        lr = opt_config.get("learning_rate")
+        if callable(lr):
+            opt_config["learning_rate"] = f"schedule:{type(lr).__name__}"
         return {
             "name": self.name,
             "model": models_module.model_spec(self.model),
             "target": self.target.name,
             "loss_impl": getattr(self.loss_impl, "__name__", str(self.loss_impl)),
             "loss_kwargs": self.loss_kwargs,
-            "optimizer": self.optimizer,
+            "optimizer": opt_config,
             "sampler": getattr(self.sampler, "__name__", str(self.sampler)),
             "n_epochs": self.n_epochs,
             "batch_size": self.batch_size,
@@ -196,7 +215,7 @@ class Experiment:
             json.dump(config, f, indent=2, sort_keys=True)
 
     def _build_template_state(self):
-        optimizer = training.build_optimizer(self.optimizer)
+        optimizer = training.build_optimizer(self._optimizer_spec_dict())
         rng = jr.PRNGKey(self.seed)
         return training.create_train_state(
             rng, self.model, optimizer, batch_size_hint=self.batch_size
