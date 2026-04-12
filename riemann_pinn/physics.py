@@ -43,8 +43,15 @@ dfstar_dp = jax.grad(fstar, argnums=0)
 
 
 @jax.jit
-def find_pstar(gas_state, p0: float = 1.0):
-    """Newton iteration for p*; returns (pstar, final residual)."""
+def find_pstar(gas_state, p0=None):
+    """Newton iteration for p*; returns (pstar, final residual).
+
+    If p0 is None (default), the two-rarefaction approximation is used
+    as the initial guess, which converges for a much wider range of
+    input states than the old fixed p0=1.0 default.
+    """
+    if p0 is None:
+        p0 = two_rarefaction_p0(gas_state)
 
     def cond(state):
         pstar, fstar_, i = state
