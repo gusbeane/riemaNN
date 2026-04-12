@@ -115,6 +115,14 @@ class Experiment:
         if not skip_plots:
             self._make_plots(state, loss_trace)
 
+        # Update the cross-experiment summary table.
+        from scripts.summarize import write_summary
+
+        try:
+            write_summary()
+        except Exception:
+            pass  # non-critical; don't crash the experiment
+
         return ExperimentResult(
             name=self.name,
             config=config,

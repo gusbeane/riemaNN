@@ -7,4 +7,5 @@ __pycache__/
 outputs/*/config.json
 outputs/*/metrics.json
 outputs/*/plots/
+outputs/summary.txt
 .DS_Store
