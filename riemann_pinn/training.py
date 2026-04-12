@@ -41,6 +41,8 @@ def build_optimizer(spec: dict[str, Any]) -> optax.GradientTransformation:
         return optax.adamw(**spec)
     if kind == "sgd":
         return optax.sgd(**spec)
+    if kind == "lbfgs":
+        return optax.lbfgs(**spec)
     raise ValueError(f"Unknown optimizer type: {kind!r}")
 
 
@@ -79,6 +81,47 @@ def make_train_step(loss_fn: Callable) -> Callable:
         )
         state = state.apply_gradients(grads=grads)
         return state, loss, metrics
+
+    return train_step
+
+
+def make_lbfgs_train_step(loss_fn: Callable) -> Callable:
+    """Like `make_train_step` but for L-BFGS (GradientTransformationExtraArgs).
+
+    L-BFGS's update() requires extra kwargs (value, grad, value_fn) for the
+    zoom linesearch, and Flax's TrainState.apply_gradients() doesn't pass them.
+    This function bypasses apply_gradients and calls the optimizer directly.
+
+    Returns the same ``(state, gas_states_log) -> (state, loss, metrics)``
+    interface so ``run_training_loop`` works unchanged.
+    """
+
+    @jax.jit
+    def train_step(state, gas_states_log):
+        # value_fn for linesearch: params -> scalar, closes over current batch
+        def value_fn(params):
+            loss, _metrics = loss_fn(params, state.apply_fn, gas_states_log)
+            return loss
+
+        (loss, metrics), grads = jax.value_and_grad(
+            lambda p: loss_fn(p, state.apply_fn, gas_states_log),
+            has_aux=True,
+        )(state.params)
+
+        updates, new_opt_state = state.tx.update(
+            grads,
+            state.opt_state,
+            state.params,
+            value=loss,
+            grad=grads,
+            value_fn=value_fn,
+        )
+        new_params = optax.apply_updates(state.params, updates)
+        return state.replace(
+            step=state.step + 1,
+            params=new_params,
+            opt_state=new_opt_state,
+        ), loss, metrics
 
     return train_step
 
