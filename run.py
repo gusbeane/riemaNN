@@ -1,113 +1,144 @@
-"""Train a PINN for Riemann star pressure: Adam (10k) -> L-BFGS (1k), w256 d3."""
+"""Train a PINN for Riemann star pressure from a TOML config file."""
 
 import argparse
 import json
+import shutil
 import time
+import tomllib
 from pathlib import Path
 
 import jax
 jax.config.update("jax_enable_x64", True)
 
-import jax.numpy as jnp
 import jax.random as jr
-from flax.training import train_state as flax_train_state
+import optax
 
-from riemann_pinn.model import StarPressureMLP
+from riemann_pinn.model import StarPressureDS, StarPressureMLP
 from riemann_pinn.train import (
-    build_optimizer, create_train_state, evaluate_holdout,
-    load_checkpoint, load_loss_trace, make_lbfgs_train_step,
+    create_train_state, evaluate_holdout,
+    load_checkpoint, load_loss_trace,
     make_train_step, residual_loss, run_training_loop, save_checkpoint,
     save_loss_trace, uniform_log,
 )
-from riemann_pinn.plot import plot_loss, plot_slice
-
-# --- config -------------------------------------------------------------------
-
-NAME = "al_w256_d3"
-MODEL = StarPressureMLP(width=256, depth=3)
-SEED = 42
-ADAM_EPOCHS = 10_000
-ADAM_LR = 1e-3
-ADAM_BATCH = 256
-LBFGS_EPOCHS = 1_000
-LBFGS_BATCH = 4096
-LBFGS_MEMORY = 10
-
-# --- paths --------------------------------------------------------------------
-
-OUT_DIR = Path("outputs") / NAME
-CKPT_PATH = OUT_DIR / "checkpoint.msgpack"
-LOSS_PATH = OUT_DIR / "loss.npy"
-METRICS_PATH = OUT_DIR / "metrics.json"
-LOSS_PLOT = OUT_DIR / "plots" / "loss.png"
-SLICE_PLOT = OUT_DIR / "plots" / "slice.png"
+from riemann_pinn.plot import plot_loss, plot_pstar_hist2d, plot_slice
 
 
-def train_model():
-    rng = jr.PRNGKey(SEED)
+def load_config(path: Path) -> dict:
+    with open(path, "rb") as f:
+        return tomllib.load(f)
 
-    # Phase 1: Adam
-    adam_opt = build_optimizer({"type": "adam", "learning_rate": ADAM_LR})
-    state = create_train_state(rng, MODEL, adam_opt, batch_size_hint=ADAM_BATCH)
-    adam_step = make_train_step(residual_loss)
-    state, trace_adam = run_training_loop(
-        state, adam_step, uniform_log, jr.fold_in(rng, 1),
-        n_epochs=ADAM_EPOCHS, batch_size=ADAM_BATCH,
-        desc=f"{NAME} adam", log_every=2000,
+
+def build_model(cfg):
+    arch = cfg["model"]["arch"]
+    width = cfg["model"]["width"]
+    depth = cfg["model"]["depth"]
+    if arch == "mlp":
+        return StarPressureMLP(width=width, depth=depth)
+    elif arch == "ds":
+        phi_output_dim = cfg["model"]["ds"]["phi_output_dim"]
+        return StarPressureDS(
+            phi_width=width, phi_depth=depth, phi_output_dim=phi_output_dim,
+            rho_width=width, rho_depth=depth,
+        )
+    else:
+        raise ValueError(f"Unknown model arch: {arch!r}")
+
+
+def run_name(config_path: Path) -> str:
+    return config_path.stem
+
+
+def train_model(cfg, model, name):
+    t = cfg["training"]
+    domain = cfg["domain"]
+    rng = jr.PRNGKey(t["seed"])
+    schedule = optax.cosine_decay_schedule(init_value=t["lr"], decay_steps=t["n_epochs"])
+    optimizer = optax.adam(learning_rate=schedule)
+    state = create_train_state(rng, model, optimizer, batch_size_hint=t["batch_size"])
+    step = make_train_step(residual_loss)
+
+    domain_kw = dict(
+        log_rho_range=tuple(domain["log_rho_range"]),
+        log_p_range=tuple(domain["log_p_range"]),
+        u_range=tuple(domain["u_range"]),
     )
 
-    # Phase 2: L-BFGS
-    lbfgs_opt = build_optimizer({"type": "lbfgs", "memory_size": LBFGS_MEMORY})
-    state = flax_train_state.TrainState.create(
-        apply_fn=state.apply_fn, params=state.params, tx=lbfgs_opt,
-    )
-    lbfgs_step = make_lbfgs_train_step(residual_loss)
-    state, trace_lbfgs = run_training_loop(
-        state, lbfgs_step, uniform_log, jr.fold_in(rng, 2),
-        n_epochs=LBFGS_EPOCHS, batch_size=LBFGS_BATCH,
-        desc=f"{NAME} lbfgs", log_every=100,
-    )
+    def sampler(rng, batch_size):
+        return uniform_log(rng, batch_size, **domain_kw)
 
-    return state, jnp.concatenate([trace_adam, trace_lbfgs])
+    state, trace = run_training_loop(
+        state, step, sampler, jr.fold_in(rng, 1),
+        n_epochs=t["n_epochs"], batch_size=t["batch_size"],
+        desc=name, log_every=t["log_every"],
+    )
+    return state, trace
 
 
 def main():
     ap = argparse.ArgumentParser()
+    ap.add_argument("--config", default="config.toml", help="path to TOML config")
     ap.add_argument("--retrain", action="store_true", help="ignore checkpoint")
     ap.add_argument("--skip-plots", action="store_true")
     args = ap.parse_args()
 
+    cfg = load_config(Path(args.config))
+    t = cfg["training"]
+    domain = cfg["domain"]
+    domain_kw = dict(
+        log_rho_range=tuple(domain["log_rho_range"]),
+        log_p_range=tuple(domain["log_p_range"]),
+        u_range=tuple(domain["u_range"]),
+    )
+
+    model = build_model(cfg)
+    name = run_name(Path(args.config))
+
+    out_dir = Path("outputs") / name
+    ckpt_path = out_dir / "checkpoint.msgpack"
+    loss_path = out_dir / "loss.npy"
+    metrics_path = out_dir / "metrics.json"
+    loss_plot = out_dir / "plots" / "loss.png"
+    slice_plot = out_dir / "plots" / "slice.png"
+
     training_time_s = None
-    if CKPT_PATH.is_file() and not args.retrain:
-        print(f"Loading checkpoint from {CKPT_PATH}")
-        rng = jr.PRNGKey(SEED)
-        template = create_train_state(
-            rng, MODEL,
-            build_optimizer({"type": "lbfgs", "memory_size": LBFGS_MEMORY}),
+    if ckpt_path.is_file() and not args.retrain:
+        print(f"Loading checkpoint from {ckpt_path}")
+        rng = jr.PRNGKey(t["seed"])
+        schedule = optax.cosine_decay_schedule(
+            init_value=t["lr"], decay_steps=t["n_epochs"],
         )
-        state = load_checkpoint(CKPT_PATH, template)
-        loss_trace = load_loss_trace(LOSS_PATH)
+        template = create_train_state(rng, model, optax.adam(learning_rate=schedule))
+        state = load_checkpoint(ckpt_path, template)
+        loss_trace = load_loss_trace(loss_path)
     else:
         t0 = time.monotonic()
-        state, loss_trace = train_model()
+        state, loss_trace = train_model(cfg, model, name)
         training_time_s = round(time.monotonic() - t0, 1)
-        save_checkpoint(CKPT_PATH, state)
-        save_loss_trace(LOSS_PATH, loss_trace)
+        save_checkpoint(ckpt_path, state)
+        save_loss_trace(loss_path, loss_trace)
+
+    # Save config alongside outputs
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(args.config, out_dir / "config.toml")
 
     # Evaluate
-    metrics = evaluate_holdout(state)
+    metrics = evaluate_holdout(state, **domain_kw)
     if training_time_s is not None:
         metrics["training_time_s"] = training_time_s
-    METRICS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with METRICS_PATH.open("w") as f:
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    with metrics_path.open("w") as f:
         json.dump(metrics, f, indent=2, sort_keys=True)
     print(json.dumps(metrics, indent=2, sort_keys=True))
 
     # Plot
     if not args.skip_plots:
         if loss_trace is not None:
-            plot_loss(loss_trace, LOSS_PLOT, title=f"Training loss — {NAME}")
-        plot_slice(state, SLICE_PLOT)
+            plot_loss(loss_trace, loss_plot, title=f"Training loss — {name}")
+        plot_slice(state, slice_plot,
+                   log_rho_range=domain_kw["log_rho_range"],
+                   log_p_range=domain_kw["log_p_range"])
+        plot_pstar_hist2d(state, out_dir / "plots" / "pstar_hist2d.png",
+                          **domain_kw)
 
 
 if __name__ == "__main__":

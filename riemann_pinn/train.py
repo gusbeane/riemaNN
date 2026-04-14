@@ -9,7 +9,6 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
-import optax
 from flax.serialization import from_bytes, to_bytes
 from flax.training import train_state as flax_train_state
 from tqdm import tqdm
@@ -25,7 +24,7 @@ def uniform_log(
     rng,
     batch_size: int,
     *,
-    log_rho_range: tuple[float, float] = (-2.0, 2.0),
+    log_rho_range: tuple[float, float] = (0.0, 2.0),
     log_p_range: tuple[float, float] = (-2.0, 2.0),
     u_range: tuple[float, float] = (-1.0, 1.0),
 ) -> jnp.ndarray:
@@ -58,16 +57,6 @@ def residual_loss(params, apply_fn, gas_states_log):
 # --- optimizer ----------------------------------------------------------------
 
 
-def build_optimizer(spec: dict[str, Any]) -> optax.GradientTransformation:
-    spec = dict(spec)
-    kind = spec.pop("type")
-    if kind == "adam":
-        return optax.adam(**spec)
-    if kind == "lbfgs":
-        return optax.lbfgs(**spec)
-    raise ValueError(f"Unknown optimizer type: {kind!r}")
-
-
 # --- train state + step -------------------------------------------------------
 
 
@@ -94,33 +83,9 @@ def make_train_step(loss_fn: Callable) -> Callable:
     return train_step
 
 
-def make_lbfgs_train_step(loss_fn: Callable) -> Callable:
-    @jax.jit
-    def train_step(state, gas_states_log):
-        def value_fn(params):
-            loss, _metrics = loss_fn(params, state.apply_fn, gas_states_log)
-            return loss
-
-        (loss, metrics), grads = jax.value_and_grad(
-            lambda p: loss_fn(p, state.apply_fn, gas_states_log),
-            has_aux=True,
-        )(state.params)
-
-        updates, new_opt_state = state.tx.update(
-            grads, state.opt_state, state.params,
-            value=loss, grad=grads, value_fn=value_fn,
-        )
-        new_params = optax.apply_updates(state.params, updates)
-        return state.replace(
-            step=state.step + 1, params=new_params, opt_state=new_opt_state,
-        ), loss, metrics
-
-    return train_step
-
-
 def run_training_loop(
     state, train_step, sampler, rng, n_epochs, batch_size,
-    *, log_every=2000, desc="train",
+    *, log_every=100, desc="train",
 ):
     loss_trace: list[float] = []
     pbar = tqdm(range(n_epochs), desc=desc)
@@ -160,10 +125,10 @@ def load_loss_trace(path: Path) -> np.ndarray | None:
 # --- evaluation ---------------------------------------------------------------
 
 
-def evaluate_holdout(state, n_samples=20_000, seed=999):
+def evaluate_holdout(state, n_samples=20_000, seed=999, **domain_kwargs):
     """Compute residual and pressure-error metrics on a holdout batch."""
     rng = jr.PRNGKey(seed)
-    gas_states_log = uniform_log(rng, n_samples)
+    gas_states_log = uniform_log(rng, n_samples, **domain_kwargs)
     gas_states_phys = physics.gas_log_to_phys(gas_states_log)
 
     raw_out = state.apply_fn({"params": state.params}, gas_states_log)
