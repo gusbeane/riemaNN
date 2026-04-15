@@ -4,6 +4,7 @@ __pycache__/
 *.png
 *.msgpack
 *.npy
+*.out
 outputs/
 .DS_Store
 .claude/

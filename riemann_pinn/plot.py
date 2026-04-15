@@ -22,11 +22,11 @@ from .train import uniform_log  # noqa: E402
 
 def plot_loss(loss_trace, out_path: Path, *, title: str = "Training loss") -> None:
     arr = np.asarray(loss_trace)
-    fig, ax = plt.subplots(1, 1, figsize=(12, 3))
+    fig, ax = plt.subplots(1, 1, figsize=(12, 5))
     ax.plot(np.log10(arr))
     ax.set_xlabel("epoch")
     ax.set_ylabel(r"$\log_{10}(\mathrm{loss})$")
-    ax.set_ylim(-4, 4)
+    ax.set_ylim(-8, 4)
     ax.set_title(title)
     ax.grid(True, alpha=0.3)
     plt.tight_layout()
@@ -36,8 +36,9 @@ def plot_loss(loss_trace, out_path: Path, *, title: str = "Training loss") -> No
 
 
 def plot_slice(
-    state, out_path: Path, *, n: int = 100,
+    state, out_path: Path, *, n: int = 250,
     log_rho_range=(-1.0, 2.0), log_p_range=(-2.0, 2.0),
+    err_range=(-0.1, 0.1), nbins=100,
 ) -> None:
     """Two-panel heatmap: log10(p_NN/p_true) and signed log|f(p_NN)|."""
     # Build 2D grid over (log rhoL, log pL) with right state and uRL fixed
@@ -69,8 +70,8 @@ def plot_slice(
         "signed_f": r"$\mathrm{sign}(f)\,\log_{10}|f(p^*_{\mathrm{NN}})|$",
     }
 
-    fig, axes = plt.subplots(1, 2, figsize=(12, 5))
-    for ax, z, key in zip(axes, [log_ratio, signed_f], ["log_ratio", "signed_f"]):
+    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
+    for ax, z, key in zip(axes[:2], [log_ratio, signed_f], ["log_ratio", "signed_f"]):
         v = float(np.nanmax(np.abs(z)))
         if not np.isfinite(v) or v == 0.0:
             v = 1e-6
@@ -80,6 +81,20 @@ def plot_slice(
         ax.set_ylabel(r"$\log_{10}p_L$")
         ax.set_title(titles[key])
         fig.colorbar(c, ax=ax)
+    
+    ax = axes[2]
+    bins = np.linspace(err_range[0], err_range[1], nbins)
+    ax.hist(log_ratio, bins=bins, histtype='step', ec='k', density=True)
+    ax.set(xlim=err_range, yscale='log')
+
+    # now do symmetry test
+    gas_states_log_sym = gas_states_log[:, [2, 3, 0, 1, 4]]
+    gas_states_log_sym = gas_states_log_sym.at[:, 4].multiply(-1)
+    raw_out_sym = state.apply_fn({"params": state.params}, gas_states_log_sym)
+    pstar_nn_sym = 10.0 ** raw_out_sym
+    log_ratio_sym = jnp.log10(pstar_nn) - jnp.log10(pstar_nn_sym)
+
+    ax.hist(log_ratio_sym, bins=bins, histtype='step', ec='b', density=True)
 
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
