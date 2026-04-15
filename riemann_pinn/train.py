@@ -53,6 +53,15 @@ def residual_loss(params, apply_fn, gas_states_log):
     loss = jnp.mean(fstar_vals ** 2)
     return loss, {"loss/fstar": loss}
 
+def residual_loss_supervised(params, apply_fn, gas_states_log):
+    raw = apply_fn({"params": params}, gas_states_log)
+    pstar_NN = 10.0 ** raw
+    # gas_states_phys = jax.vmap(physics.gas_log_to_phys)(gas_states_log)
+    gas_states_phys = physics.gas_log_to_phys(gas_states_log)
+    pstar_true, fpstar_true = jax.vmap(physics.find_pstar)(gas_states_phys)
+    loss = jnp.mean((pstar_NN - pstar_true)**2)
+    return loss, {"loss": loss}
+
 
 # --- optimizer ----------------------------------------------------------------
 
@@ -155,12 +164,25 @@ def evaluate_holdout(state, n_samples=20_000, seed=999, **domain_kwargs):
     # Pressure error vs exact solver
     pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states_phys)
     pos = (pstar_true > 1e-30) & (pstar_nn > 1e-30)
-    abs_dlogp = jnp.abs(jnp.log10(pstar_nn) - jnp.log10(pstar_true))
+    dlogp = jnp.log10(pstar_nn) - jnp.log10(pstar_true)
+    abs_dlogp = jnp.abs(dlogp)
     abs_dlogp = jnp.where(pos, abs_dlogp, jnp.nan)
     abs_dlogp_np = np.asarray(abs_dlogp)
     metrics["median_abs_delta_log10_p"] = float(np.nanmedian(abs_dlogp_np))
     metrics["p95_abs_delta_log10_p"] = float(np.nanpercentile(abs_dlogp_np, 95.0))
     metrics["frac_both_p_positive"] = float(jnp.mean(pos))
+
+    metrics["frac_worse_50percent"] = float(
+        jnp.mean((dlogp > jnp.log10(1.5)) | (dlogp < jnp.log10(0.5)))
+    )
+    
+    metrics["frac_worse_1percent"] = float(
+        jnp.mean((dlogp > jnp.log10(1.01)) | (dlogp < jnp.log10(0.99)))
+    )
+
+    metrics["frac_worse_0p1percent"] = float(
+        jnp.mean((dlogp > jnp.log10(1.001)) | (dlogp < jnp.log10(0.999)))
+    )
 
     rel_p = jnp.abs(pstar_nn - pstar_true) / jnp.maximum(jnp.abs(pstar_true), 1e-30)
     metrics["median_rel_abs_p_err"] = float(jnp.median(rel_p))

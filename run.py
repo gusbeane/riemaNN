@@ -17,7 +17,7 @@ from riemann_pinn.model import StarPressureDS, StarPressureMLP
 from riemann_pinn.train import (
     create_train_state, evaluate_holdout,
     load_checkpoint, load_loss_trace,
-    make_train_step, residual_loss, run_training_loop, save_checkpoint,
+    make_train_step, residual_loss, residual_loss_supervised, run_training_loop, save_checkpoint,
     save_loss_trace, uniform_log,
 )
 from riemann_pinn.plot import (
@@ -58,7 +58,13 @@ def train_model(cfg, model, name):
     schedule = optax.cosine_decay_schedule(init_value=t["lr"], decay_steps=t["n_epochs"])
     optimizer = optax.adam(learning_rate=schedule)
     state = create_train_state(rng, model, optimizer, batch_size_hint=t["batch_size"])
-    step = make_train_step(residual_loss)
+    
+    if t["loss"] == "fstar":
+        step = make_train_step(residual_loss)
+    elif t["loss"] == "pstar":
+        step = make_train_step(residual_loss_supervised)
+    else:
+        raise ValueError("Unrecognized loss")
 
     domain_kw = dict(
         log_rho_range=tuple(domain["log_rho_range"]),
