@@ -5,25 +5,6 @@ from typing import Callable
 import flax.linen as nn
 import jax.numpy as jnp
 
-
-class StarPressureMLP(nn.Module):
-    """MLP that maps a log-space gas state (B, 5) to a scalar log10(p*)."""
-
-    width: int = 64
-    depth: int = 2
-    activation: Callable = nn.silu
-    output_dim: int = 1
-
-    @nn.compact
-    def __call__(self, x):
-        for _ in range(self.depth):
-            x = nn.Dense(self.width)(x)
-            x = self.activation(x)
-        x = nn.Dense(self.output_dim)(x)
-        if self.output_dim == 1:
-            x = x.squeeze(-1)
-        return x
-
 class _MLP(nn.Module):
     """Small reusable MLP block."""
     width: int = 64
@@ -38,6 +19,25 @@ class _MLP(nn.Module):
             x = self.activation(x)
         return nn.Dense(self.output_dim)(x)
 
+class StarPressureMLP(nn.Module):
+    """MLP that maps a log-space gas state (B, 5) to a scalar log10(p*)."""
+
+    width: int = 64
+    depth: int = 2
+    activation: Callable = nn.silu
+    output_dim: int = 1
+
+    @nn.compact
+    def __call__(self, x):
+        model = _MLP(width=self.width, depth=self.depth, activation=self.activation,
+                 output_dim=self.output_dim)
+        
+        x = model(x)
+
+        if self.output_dim == 1:
+            x = x.squeeze(-1)
+            
+        return x
 
 class StarPressureDS(nn.Module):
     """Deep Set that predicts log10(p*) from log-space gas state.
