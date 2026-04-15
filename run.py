@@ -20,7 +20,10 @@ from riemann_pinn.train import (
     make_train_step, residual_loss, run_training_loop, save_checkpoint,
     save_loss_trace, uniform_log,
 )
-from riemann_pinn.plot import plot_loss, plot_pstar_hist2d, plot_slice
+from riemann_pinn.plot import (
+    plot_corner_error, plot_corner_pstar,
+    plot_loss, plot_pstar_hist2d, plot_slice,
+)
 
 
 def load_config(path: Path) -> dict:
@@ -138,6 +141,10 @@ def main():
                    log_rho_range=domain_kw["log_rho_range"],
                    log_p_range=domain_kw["log_p_range"])
         plot_pstar_hist2d(state, out_dir / "plots" / "pstar_hist2d.png",
+                          **domain_kw)
+        plot_corner_error(state, out_dir / "plots" / "corner_error.png",
+                          **domain_kw)
+        plot_corner_pstar(out_dir / "plots" / "corner_pstar.png",
                           **domain_kw)
 
 

@@ -87,6 +87,169 @@ def plot_slice(
     plt.close(fig)
 
 
+# --- Corner plots -------------------------------------------------------------
+
+_VAR_LABELS = [
+    r"$\log_{10}\rho_L$",
+    r"$\log_{10}p_L$",
+    r"$\log_{10}\rho_R$",
+    r"$\log_{10}p_R$",
+    r"$u_{RL}$",
+]
+
+
+def _corner_panels(n, *, log_rho_range, log_p_range, u_range):
+    """Build gas-state grids for all 10 lower-triangle variable pairs.
+
+    Returns ``(panels, axes_np)`` where *panels* is a list of
+    ``(grid_row, grid_col, gas_states_log)`` and ``axes_np[k]`` is the
+    1-D numpy array for variable *k*.
+    """
+    ranges = [log_rho_range, log_p_range, log_rho_range, log_p_range, u_range]
+    mids = [0.5 * (r[0] + r[1]) for r in ranges]
+    axes = [jnp.linspace(r[0], r[1], n) for r in ranges]
+
+    panels = []
+    for row in range(4):
+        for col in range(row + 1):
+            x_var, y_var = col, row + 1
+            xg, yg = jnp.meshgrid(axes[x_var], axes[y_var], indexing="ij")
+            state_cols = []
+            for k in range(5):
+                if k == x_var:
+                    state_cols.append(xg.ravel())
+                elif k == y_var:
+                    state_cols.append(yg.ravel())
+                else:
+                    state_cols.append(jnp.full(n * n, mids[k]))
+            panels.append((row, col, jnp.stack(state_cols, axis=-1)))
+    return panels, [np.asarray(a) for a in axes]
+
+
+def plot_corner_error(
+    state, out_path: Path, *, n: int = 50,
+    log_rho_range=(0.0, 2.0), log_p_range=(-2.0, 2.0), u_range=(-1.0, 1.0),
+) -> None:
+    """Corner plot of log10(p*_NN / p*_true) over all input variable pairs."""
+    panels, axes_np = _corner_panels(
+        n, log_rho_range=log_rho_range, log_p_range=log_p_range, u_range=u_range,
+    )
+
+    all_gas_log = jnp.concatenate([g for _, _, g in panels], axis=0)
+    raw_all = state.apply_fn({"params": state.params}, all_gas_log)
+    pstar_nn_all = 10.0 ** raw_all
+    gas_phys_all = physics.gas_log_to_phys(all_gas_log)
+    pstar_true_all, _ = jax.vmap(physics.find_pstar)(gas_phys_all)
+    log_ratio_all = np.asarray(jnp.log10(pstar_nn_all / pstar_true_all))
+
+    panel_data = []
+    offset = 0
+    for row, col, gas_log in panels:
+        npts = gas_log.shape[0]
+        z = log_ratio_all[offset:offset + npts].reshape(n, n)
+        panel_data.append((row, col, z))
+        offset += npts
+
+    vmax = max(float(np.nanmax(np.abs(d[2]))) for d in panel_data)
+    if not np.isfinite(vmax) or vmax == 0:
+        vmax = 1e-6
+    norm = TwoSlopeNorm(vmin=-vmax, vcenter=0.0, vmax=vmax)
+
+    fig, axarr = plt.subplots(4, 4, figsize=(12, 12))
+    for r in range(4):
+        for c in range(r + 1, 4):
+            axarr[r, c].set_visible(False)
+
+    mappable = None
+    for row, col, z in panel_data:
+        ax = axarr[row, col]
+        x_var, y_var = col, row + 1
+        mappable = ax.pcolormesh(
+            axes_np[x_var], axes_np[y_var], z.T,
+            shading="auto", cmap="RdBu_r", norm=norm,
+        )
+        if row < 3:
+            ax.tick_params(labelbottom=False)
+        else:
+            ax.set_xlabel(_VAR_LABELS[col])
+        if col > 0:
+            ax.tick_params(labelleft=False)
+        else:
+            ax.set_ylabel(_VAR_LABELS[row + 1])
+
+    fig.colorbar(
+        mappable, ax=axarr.ravel().tolist(),
+        label=r"$\log_{10}(p^*_{\mathrm{NN}}/p^*_{\mathrm{true}})$",
+        shrink=0.6, pad=0.02,
+    )
+    plt.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
+def plot_corner_pstar(
+    out_path: Path, *, n: int = 50,
+    log_rho_range=(0.0, 2.0), log_p_range=(-2.0, 2.0), u_range=(-1.0, 1.0),
+) -> None:
+    """Corner plot of log10(p*_true) over all input variable pairs."""
+    panels, axes_np = _corner_panels(
+        n, log_rho_range=log_rho_range, log_p_range=log_p_range, u_range=u_range,
+    )
+
+    all_gas_log = jnp.concatenate([g for _, _, g in panels], axis=0)
+    gas_phys_all = physics.gas_log_to_phys(all_gas_log)
+    pstar_true_all, _ = jax.vmap(physics.find_pstar)(gas_phys_all)
+    log_pstar_all = np.asarray(jnp.log10(jnp.maximum(pstar_true_all, 1e-30)))
+
+    panel_data = []
+    offset = 0
+    for row, col, gas_log in panels:
+        npts = gas_log.shape[0]
+        z = log_pstar_all[offset:offset + npts].reshape(n, n)
+        panel_data.append((row, col, z))
+        offset += npts
+
+    vmin = min(float(np.nanmin(d[2])) for d in panel_data)
+    vmax = max(float(np.nanmax(d[2])) for d in panel_data)
+    if not np.isfinite(vmin):
+        vmin = -2.0
+    if not np.isfinite(vmax):
+        vmax = 2.0
+
+    fig, axarr = plt.subplots(4, 4, figsize=(12, 12))
+    for r in range(4):
+        for c in range(r + 1, 4):
+            axarr[r, c].set_visible(False)
+
+    mappable = None
+    for row, col, z in panel_data:
+        ax = axarr[row, col]
+        x_var, y_var = col, row + 1
+        mappable = ax.pcolormesh(
+            axes_np[x_var], axes_np[y_var], z.T,
+            shading="auto", cmap="viridis", vmin=vmin, vmax=vmax,
+        )
+        if row < 3:
+            ax.tick_params(labelbottom=False)
+        else:
+            ax.set_xlabel(_VAR_LABELS[col])
+        if col > 0:
+            ax.tick_params(labelleft=False)
+        else:
+            ax.set_ylabel(_VAR_LABELS[row + 1])
+
+    fig.colorbar(
+        mappable, ax=axarr.ravel().tolist(),
+        label=r"$\log_{10}\,p^*_{\mathrm{true}}$",
+        shrink=0.6, pad=0.02,
+    )
+    plt.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+
 def plot_pstar_hist2d(
     state, out_path: Path, *, n_samples: int = 50_000, seed: int = 999,
     **domain_kwargs,
