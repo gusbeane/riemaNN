@@ -234,16 +234,6 @@ def evaluate_holdout(state, n_samples=20_000, seed=999, **domain_kwargs):
     metrics["median_abs_fstar"] = float(jnp.median(abs_f))
     metrics["p95_abs_fstar"] = float(jnp.percentile(abs_f, 95.0))
 
-    # Newton-step metric: |f/f'| approximates |delta p|
-    dfstar_vals = jax.vmap(physics.dfstar_dp)(pstar_nn, gas_states_phys)
-    safe_df = jnp.where(
-        jnp.abs(dfstar_vals) > 1e-20, dfstar_vals,
-        jnp.sign(dfstar_vals + 1e-30) * 1e-20,
-    )
-    newton_steps = jnp.abs(fstar_vals / safe_df)
-    metrics["median_abs_newton_step"] = float(jnp.median(newton_steps))
-    metrics["p95_abs_newton_step"] = float(jnp.percentile(newton_steps, 95.0))
-
     # Pressure error vs exact solver
     pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states_phys)
     pos = (pstar_true > 1e-30) & (pstar_nn > 1e-30)
@@ -255,20 +245,14 @@ def evaluate_holdout(state, n_samples=20_000, seed=999, **domain_kwargs):
     metrics["p95_abs_delta_log10_p"] = float(np.nanpercentile(abs_dlogp_np, 95.0))
     metrics["frac_both_p_positive"] = float(jnp.mean(pos))
 
-    metrics["frac_worse_50percent"] = float(
-        jnp.mean((dlogp > jnp.log10(1.5)) | (dlogp < jnp.log10(0.5)))
-    )
-    
-    metrics["frac_worse_1percent"] = float(
-        jnp.mean((dlogp > jnp.log10(1.01)) | (dlogp < jnp.log10(0.99)))
-    )
+    abs_absolute = jnp.abs(pstar_nn - pstar_true)
+    metrics["abs_absolute_median"] = float(np.nanmedian(abs_absolute))
+    metrics["abs_absolute_p95"] = float(np.nanpercentile(abs_absolute, 95.0))
+    metrics["abs_absolute_p5"] = float(np.nanpercentile(abs_absolute, 5.0))
 
-    metrics["frac_worse_0p1percent"] = float(
-        jnp.mean((dlogp > jnp.log10(1.001)) | (dlogp < jnp.log10(0.999)))
-    )
-
-    rel_p = jnp.abs(pstar_nn - pstar_true) / jnp.maximum(jnp.abs(pstar_true), 1e-30)
-    metrics["median_rel_abs_p_err"] = float(jnp.median(rel_p))
-    metrics["p95_rel_abs_p_err"] = float(jnp.percentile(rel_p, 95.0))
+    any_nan_nn = bool(jnp.any(jnp.isnan(pstar_nn)))
+    any_nan_true = bool(jnp.any(jnp.isnan(pstar_true)))
+    metrics["any_nan_nn"] = "true" if any_nan_nn else "false"
+    metrics["any_nan_true"] = "true" if any_nan_true else "false"
 
     return metrics
