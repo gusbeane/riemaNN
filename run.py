@@ -67,8 +67,14 @@ def main():
         state = load_checkpoint(ckpt_path, build_template_state(exp))
         loss_trace = load_loss_trace(loss_path)
     else:
+        frames_dir = plots_dir / "corner_frames"
+        def corner_cb(s, step):
+            plot_corner_error(
+                s, frames_dir / f"corner_error_{step:07d}.png", **exp.domain,
+            )
+        cb = None if args.skip_plots else corner_cb
         t0 = time.monotonic()
-        state, loss_trace, _ = run_experiment(exp)
+        state, loss_trace, _ = run_experiment(exp, corner_callback=cb)
         training_time_s = round(time.monotonic() - t0, 1)
         save_checkpoint(ckpt_path, state)
         save_loss_trace(loss_path, loss_trace)

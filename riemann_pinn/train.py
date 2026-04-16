@@ -212,7 +212,8 @@ def make_lbfgs_train_step(loss_fn: Callable) -> Callable:
 
 def run_training_loop(
     state, train_step, sampler, rng, n_epochs, batch_size,
-    *, log_every=100, desc="train", split_key_every=1
+    *, log_every=100, desc="train", split_key_every=1,
+    step_callback: Callable | None = None, step_offset: int = 0,
 ):
     loss_trace: list[float] = []
     pbar = tqdm(range(n_epochs), desc=desc)
@@ -224,6 +225,8 @@ def run_training_loop(
         loss_trace.append(float(loss))
         if epoch % log_every == 0:
             pbar.set_postfix(loss=f"{loss:.2e}")
+        if step_callback is not None:
+            step_callback(state, step_offset + epoch + 1)
 
     return state, jnp.array(loss_trace)
 
