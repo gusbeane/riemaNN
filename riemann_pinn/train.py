@@ -40,6 +40,89 @@ def uniform_log(
     uRL = jr.uniform(keys[4], (batch_size,), minval=u_lo, maxval=u_hi)
     return jnp.stack([logrhoL, logpL, logrhoR, logpR, uRL], axis=-1)
 
+"""
+Script used to compute the quasirandom sequence golden values.
+
+import math
+
+def positive_root(d, tol=1e-15, max_iter=200):
+    # Solve x^(d+1) = x + 1 for the unique positive root in (1, 2)
+    lo, hi = 1.0, 2.0
+    for _ in range(max_iter):
+        mid = 0.5 * (lo + hi)
+        f = mid ** (d + 1) - mid - 1.0
+        if abs(f) < tol or (hi - lo) < tol:
+            return mid
+        if f > 0:
+            hi = mid
+        else:
+            lo = mid
+    return 0.5 * (lo + hi)
+
+vals = [positive_root(d) for d in range(1, 13)]
+
+print("jnp.array([")
+for v in vals:
+    print(f"    {v:.16f},")
+print("])")
+"""
+
+def R2_quasirandom(
+    rng,
+    batch_size: int,
+    *,
+    log_rho_range: tuple[float, float],
+    log_p_range: tuple[float, float],
+    u_range: tuple[float, float],
+) -> jnp.darray:
+    """Quasirandom sequences in (log10 rhoL, log10 pL, log10 rhoR, log10 pR, uRL)."""
+    keys = jr.split(rng, 1)
+    NDIM = 5 # currently hard-coded, but could accept more values
+
+    gold_values = jnp.array([
+        1.6180339887498949,
+        1.3247179572447463,
+        1.2207440846057596,
+        1.1673039782614185,
+        1.1347241384015194,
+        1.1127756842787053,
+        1.0969815577985598,
+        1.0850702454914507,
+        1.0757660660868371,
+        1.0682971889208415,
+        1.0621691678642553,
+        1.0570505752212287,
+    ])
+
+    g = gold_values[NDIM - 1]
+    powers = jnp.arange(1, NDIM + 1, dtype=jnp.float32)
+    a = g ** (-powers)
+
+    # allocate array and get starting pos
+    # we could use a recursive relationship later, but batch_size is small so this works
+    x0 = jr.uniform(rng, (NDIM,), minval=0.0, maxval=1.0)
+    n = jnp.arange(batch_size, dtype=jnp.float32)[:, None]
+    out_unit = jnp.mod(x0[None, :] + n * a[None, :], 1.0)
+
+    # Scale each column to its target range
+    lo = jnp.array([
+        log_rho_range[0],
+        log_p_range[0],
+        log_rho_range[0],
+        log_p_range[0],
+        u_range[0],
+    ], dtype=out_unit.dtype)
+
+    hi = jnp.array([
+        log_rho_range[1],
+        log_p_range[1],
+        log_rho_range[1],
+        log_p_range[1],
+        u_range[1],
+    ], dtype=out_unit.dtype)
+
+    return lo + (hi - lo) * out_unit
+
 
 # --- loss ---------------------------------------------------------------------
 
