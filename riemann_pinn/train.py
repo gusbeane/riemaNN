@@ -130,16 +130,14 @@ def R2_quasirandom(
 # --- loss ---------------------------------------------------------------------
 
 def residual_loss_allfstar(params, apply_fn, gas_states_log):
-    raw = apply_fn({"params": params}, gas_states_log)
-    pstar = 10.0 ** raw
+    pstar = apply_fn({"params": params}, gas_states_log)
     gas_states_phys = physics.gas_log_to_phys(gas_states_log)
     fstar_vals = jax.vmap(physics.fstar)(pstar, gas_states_phys)
     return jnp.abs(fstar_vals)
 
 def residual_loss(params, apply_fn, gas_states_log):
     """Mean squared f(p*) residual. Returns (loss, metrics)."""
-    raw = apply_fn({"params": params}, gas_states_log)
-    pstar = 10.0 ** raw
+    pstar = apply_fn({"params": params}, gas_states_log)
     gas_states_phys = physics.gas_log_to_phys(gas_states_log)
     fstar_vals = jax.vmap(physics.fstar)(pstar, gas_states_phys)
     val = fstar_vals**2
@@ -149,8 +147,7 @@ def residual_loss(params, apply_fn, gas_states_log):
 
 def residual_loss_normalized(params, apply_fn, gas_states_log):
     """Mean squared f(p*) residual. Returns (loss, metrics)."""
-    raw = apply_fn({"params": params}, gas_states_log)
-    pstar = 10.0 ** raw
+    pstar = apply_fn({"params": params}, gas_states_log)
     gas_states_phys = physics.gas_log_to_phys(gas_states_log)
     fstar_vals = jax.vmap(physics.fstar)(pstar, gas_states_phys)
     cref_vals = jax.vmap(physics.ref_sound_speed)(gas_states_phys)
@@ -162,9 +159,7 @@ def residual_loss_normalized(params, apply_fn, gas_states_log):
     return loss, {"loss/fstar": loss}
 
 def residual_loss_supervised(params, apply_fn, gas_states_log):
-    raw = apply_fn({"params": params}, gas_states_log)
-    pstar_NN = 10.0 ** raw
-    # gas_states_phys = jax.vmap(physics.gas_log_to_phys)(gas_states_log)
+    pstar_NN = apply_fn({"params": params}, gas_states_log)
     gas_states_phys = physics.gas_log_to_phys(gas_states_log)
     pstar_true, fpstar_true = jax.vmap(physics.find_pstar)(gas_states_phys)
     loss = jnp.mean((pstar_NN - pstar_true)**2)
@@ -277,8 +272,7 @@ def evaluate_holdout(state, n_samples=20_000, seed=999, **domain_kwargs):
     gas_states_log = uniform_log(rng, n_samples, **domain_kwargs)
     gas_states_phys = physics.gas_log_to_phys(gas_states_log)
 
-    raw_out = state.apply_fn({"params": state.params}, gas_states_log)
-    pstar_nn = 10.0 ** raw_out
+    pstar_nn = state.apply_fn({"params": state.params}, gas_states_log)
     fstar_vals = jax.vmap(physics.fstar)(pstar_nn, gas_states_phys)
 
     metrics: dict[str, Any] = {}

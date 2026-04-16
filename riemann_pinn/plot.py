@@ -51,8 +51,7 @@ def plot_slice(
     ], axis=-1)
 
     # Evaluate
-    raw_out = state.apply_fn({"params": state.params}, gas_states_log)
-    pstar_nn = 10.0 ** raw_out
+    pstar_nn = state.apply_fn({"params": state.params}, gas_states_log)
     gas_states_phys = physics.gas_log_to_phys(gas_states_log)
     pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states_phys)
     fstar_vals = jax.vmap(physics.fstar)(pstar_nn, gas_states_phys)
@@ -90,8 +89,7 @@ def plot_slice(
     # now do symmetry test
     gas_states_log_sym = gas_states_log[:, [2, 3, 0, 1, 4]]
     gas_states_log_sym = gas_states_log_sym.at[:, 4].multiply(-1)
-    raw_out_sym = state.apply_fn({"params": state.params}, gas_states_log_sym)
-    pstar_nn_sym = 10.0 ** raw_out_sym
+    pstar_nn_sym = state.apply_fn({"params": state.params}, gas_states_log_sym)
     log_ratio_sym = jnp.log10(pstar_nn) - jnp.log10(pstar_nn_sym)
 
     ax.hist(log_ratio_sym, bins=bins, histtype='step', ec='b', density=True)
@@ -151,8 +149,7 @@ def plot_corner_error(
     )
 
     all_gas_log = jnp.concatenate([g for _, _, g in panels], axis=0)
-    raw_all = state.apply_fn({"params": state.params}, all_gas_log)
-    pstar_nn_all = 10.0 ** raw_all
+    pstar_nn_all = state.apply_fn({"params": state.params}, all_gas_log)
     gas_phys_all = physics.gas_log_to_phys(all_gas_log)
     pstar_true_all, _ = jax.vmap(physics.find_pstar)(gas_phys_all)
     log_ratio_all = np.asarray(jnp.log10(pstar_nn_all / pstar_true_all))
@@ -277,8 +274,7 @@ def plot_pstar_hist2d(
     gas_states_log = uniform_log(rng, n_samples, **domain_kwargs)
     gas_states_phys = physics.gas_log_to_phys(gas_states_log)
 
-    raw_out = state.apply_fn({"params": state.params}, gas_states_log)
-    pstar_nn = 10.0 ** raw_out
+    pstar_nn = state.apply_fn({"params": state.params}, gas_states_log)
     pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states_phys)
 
     log_true = np.asarray(jnp.log10(jnp.maximum(pstar_true, 1e-30)))

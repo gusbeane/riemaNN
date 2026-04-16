@@ -1,4 +1,9 @@
-"""MLP for predicting log10(p*) from a log-space gas state."""
+"""MLP for predicting p* from a log-space gas state.
+
+The network is parameterized internally in log-space (it emits log10 p*),
+but `__call__` returns the physical p* so callers don't need to undo the
+log transform.
+"""
 
 from typing import Callable
 
@@ -20,7 +25,7 @@ class _MLP(nn.Module):
         return nn.Dense(self.output_dim)(x)
 
 class StarPressureMLP(nn.Module):
-    """MLP that maps a log-space gas state (B, 5) to a scalar log10(p*)."""
+    """MLP that maps a log-space gas state (B, 5) to a scalar p*."""
 
     width: int = 64
     depth: int = 2
@@ -31,20 +36,21 @@ class StarPressureMLP(nn.Module):
     def __call__(self, x):
         model = _MLP(width=self.width, depth=self.depth, activation=self.activation,
                  output_dim=self.output_dim)
-        
+
         x = model(x)
 
         if self.output_dim == 1:
             x = x.squeeze(-1)
-            
-        return x
+
+        return 10.0 ** x
 
 class StarPressureDS(nn.Module):
-    """Deep Set that predicts log10(p*) from log-space gas state.
+    """Deep Set that predicts p* from a log-space gas state.
 
     Shared encoder phi maps each (log rho, log p) gas state to a latent
     vector. The sum z = phi(xL) + phi(xR) is permutation-invariant.
-    Decoder rho maps (z, uRL^2) to log10(p*).
+    Decoder rho maps (z, uRL^2) to log10 p*; the module returns the
+    exponentiated p*.
     """
 
     phi_width: int = 64
@@ -72,5 +78,5 @@ class StarPressureDS(nn.Module):
         rho = _MLP(width=self.rho_width, depth=self.rho_depth,
                    output_dim=1, activation=self.activation,
                    name="rho")
-        return rho(z).squeeze(-1)               # (B,)
+        return 10.0 ** rho(z).squeeze(-1)       # (B,)
 
