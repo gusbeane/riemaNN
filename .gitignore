@@ -5,6 +5,6 @@ __pycache__/
 *.msgpack
 *.npy
 *.out
-outputs/
+outputs*/
 .DS_Store
 .claude/

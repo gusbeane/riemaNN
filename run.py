@@ -1,167 +1,82 @@
-"""Train a PINN for Riemann star pressure from a TOML config file."""
+"""Run a PINN training experiment defined by a Python file."""
 
 import argparse
+import importlib.util
 import json
 import shutil
 import time
-import tomllib
 from pathlib import Path
 
 import jax
-import jax.numpy as jnp
+
 jax.config.update("jax_enable_x64", True)
 
-import jax.random as jr
-import optax
-from flax.training.train_state import TrainState
-
-from riemann_pinn.model import StarPressureDS, StarPressureMLP
-from riemann_pinn.train import (
-    create_train_state, evaluate_holdout,
-    load_checkpoint, load_loss_trace, make_lbfgs_train_step,
-    make_train_step, residual_loss, residual_loss_supervised, run_training_loop, save_checkpoint,
-    save_loss_trace, uniform_log,
-)
+from riemann_pinn.experiment import Experiment, build_template_state, run_experiment
 from riemann_pinn.plot import (
-    plot_corner_error, plot_corner_pstar,
-    plot_loss, plot_pstar_hist2d, plot_slice,
+    plot_corner_error,
+    plot_corner_pstar,
+    plot_loss,
+    plot_pstar_hist2d,
+    plot_slice,
+)
+from riemann_pinn.train import (
+    evaluate_holdout,
+    load_checkpoint,
+    load_loss_trace,
+    save_checkpoint,
+    save_loss_trace,
 )
 
 
-def load_config(path: Path) -> dict:
-    with open(path, "rb") as f:
-        return tomllib.load(f)
-
-
-def build_model(cfg):
-    arch = cfg["model"]["arch"]
-    width = cfg["model"]["width"]
-    depth = cfg["model"]["depth"]
-    if arch == "mlp":
-        return StarPressureMLP(width=width, depth=depth)
-    elif arch == "ds":
-        phi_output_dim = cfg["model"]["ds"]["phi_output_dim"]
-        return StarPressureDS(
-            phi_width=width, phi_depth=depth, phi_output_dim=phi_output_dim,
-            rho_width=width, rho_depth=depth,
+def load_experiment(path: Path) -> Experiment:
+    spec = importlib.util.spec_from_file_location("_experiment", path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"could not load experiment module from {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    if not hasattr(module, "experiment"):
+        raise AttributeError(f"{path} must define `experiment = Experiment(...)`")
+    exp = module.experiment
+    if not isinstance(exp, Experiment):
+        raise TypeError(
+            f"{path}: `experiment` must be an Experiment instance, got {type(exp).__name__}"
         )
-    else:
-        raise ValueError(f"Unknown model arch: {arch!r}")
-
-
-def run_name(config_path: Path) -> str:
-    return config_path.stem
-
-
-def train_model(cfg, model, name):
-    t = cfg["training"]
-    domain = cfg["domain"]
-    rng = jr.PRNGKey(t["seed"])
-    schedule = optax.cosine_decay_schedule(init_value=t["lr"], decay_steps=t["n_epochs"])
-    # optimizer = optax.adam(learning_rate=schedule)
-    optimizer = optax.chain(
-        optax.clip_by_global_norm(1.0),
-        optax.adamw(learning_rate=schedule)
-    )
-    ## ======
-    ## Phase 1: adam warm start
-    ## ======
-    state = create_train_state(rng, model, optimizer, batch_size_hint=t["batch_size"])
-    
-    if t["loss"] == "fstar":
-        step = make_train_step(residual_loss)
-    elif t["loss"] == "pstar":
-        step = make_train_step(residual_loss_supervised)
-    else:
-        raise ValueError("Unrecognized loss")
-
-    domain_kw = dict(
-        log_rho_range=tuple(domain["log_rho_range"]),
-        log_p_range=tuple(domain["log_p_range"]),
-        u_range=tuple(domain["u_range"]),
-    )
-
-    def sampler(rng, batch_size):
-        return uniform_log(rng, batch_size, **domain_kw)
-
-    state, trace = run_training_loop(
-        state, step, sampler, jr.fold_in(rng, 1),
-        n_epochs=t["n_epochs"], batch_size=t["batch_size"],
-        desc=name, log_every=t["log_every"],
-    )
-
-    ## ======
-    ## Phase 2: lbfgs finisher
-    ## ======
-
-    # create new optimizer
-    lbfgs_epochs = t["n_epochs"] // 10
-    lbfgs_opt = optax.lbfgs(learning_rate=1.0, memory_size=10)
-    state = TrainState.create(
-        apply_fn=state.apply_fn, params=state.params, tx=lbfgs_opt,
-    )
-    lbfgs_step = make_lbfgs_train_step(residual_loss)
-    state, trace_lbfgs, _ = run_training_loop(
-        state, lbfgs_step, sampler, jr.fold_in(rng, 2),
-        n_epochs=lbfgs_epochs, batch_size=t["batch_size"],
-        desc=f"{name} lbfgs", log_every=t["log_every"]//10,
-        split_key_every=lbfgs_epochs+1,
-    )
-
-    trace = jnp.concatenate([trace, trace_lbfgs])
-
-    return state, trace
+    return exp
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", default="config.toml", help="path to TOML config")
+    ap.add_argument("experiment", help="path to Python experiment file")
     ap.add_argument("--retrain", action="store_true", help="ignore checkpoint")
     ap.add_argument("--skip-plots", action="store_true")
     args = ap.parse_args()
 
-    cfg = load_config(Path(args.config))
-    t = cfg["training"]
-    domain = cfg["domain"]
-    domain_kw = dict(
-        log_rho_range=tuple(domain["log_rho_range"]),
-        log_p_range=tuple(domain["log_p_range"]),
-        u_range=tuple(domain["u_range"]),
-    )
-
-    model = build_model(cfg)
-    name = run_name(Path(args.config))
+    exp_path = Path(args.experiment)
+    exp = load_experiment(exp_path)
+    name = exp_path.stem
 
     out_dir = Path("outputs") / name
     ckpt_path = out_dir / "checkpoint.msgpack"
     loss_path = out_dir / "loss.npy"
     metrics_path = out_dir / "metrics.json"
-    loss_plot = out_dir / "plots" / "loss.png"
-    slice_plot = out_dir / "plots" / "slice.png"
+    plots_dir = out_dir / "plots"
 
     training_time_s = None
     if ckpt_path.is_file() and not args.retrain:
         print(f"Loading checkpoint from {ckpt_path}")
-        rng = jr.PRNGKey(t["seed"])
-        schedule = optax.cosine_decay_schedule(
-            init_value=t["lr"], decay_steps=t["n_epochs"],
-        )
-        template = create_train_state(rng, model, optax.adam(learning_rate=schedule))
-        state = load_checkpoint(ckpt_path, template)
+        state = load_checkpoint(ckpt_path, build_template_state(exp))
         loss_trace = load_loss_trace(loss_path)
     else:
         t0 = time.monotonic()
-        state, loss_trace = train_model(cfg, model, name)
+        state, loss_trace, _ = run_experiment(exp)
         training_time_s = round(time.monotonic() - t0, 1)
         save_checkpoint(ckpt_path, state)
         save_loss_trace(loss_path, loss_trace)
 
-    # Save config alongside outputs
     out_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(args.config, out_dir / "config.toml")
+    shutil.copy2(exp_path, out_dir / exp_path.name)
 
-    # Evaluate
-    metrics = evaluate_holdout(state, **domain_kw)
+    metrics = evaluate_holdout(state, **exp.domain)
     if training_time_s is not None:
         metrics["training_time_s"] = training_time_s
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,19 +84,18 @@ def main():
         json.dump(metrics, f, indent=2, sort_keys=True)
     print(json.dumps(metrics, indent=2, sort_keys=True))
 
-    # Plot
-    if not args.skip_plots:
-        if loss_trace is not None:
-            plot_loss(loss_trace, loss_plot, title=f"Training loss — {name}")
-        plot_slice(state, slice_plot,
-                   log_rho_range=domain_kw["log_rho_range"],
-                   log_p_range=domain_kw["log_p_range"])
-        plot_pstar_hist2d(state, out_dir / "plots" / "pstar_hist2d.png",
-                          **domain_kw)
-        plot_corner_error(state, out_dir / "plots" / "corner_error.png",
-                          **domain_kw)
-        plot_corner_pstar(out_dir / "plots" / "corner_pstar.png",
-                          **domain_kw)
+    if args.skip_plots:
+        return
+    if loss_trace is not None:
+        plot_loss(loss_trace, plots_dir / "loss.png", title=f"Training loss — {name}")
+    plot_slice(
+        state, plots_dir / "slice.png",
+        log_rho_range=exp.domain["log_rho_range"],
+        log_p_range=exp.domain["log_p_range"],
+    )
+    plot_pstar_hist2d(state, plots_dir / "pstar_hist2d.png", **exp.domain)
+    plot_corner_error(state, plots_dir / "corner_error.png", **exp.domain)
+    plot_corner_pstar(plots_dir / "corner_pstar.png", **exp.domain)
 
 
 if __name__ == "__main__":
