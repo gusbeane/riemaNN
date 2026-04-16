@@ -267,6 +267,7 @@ def plot_corner_pstar(
 
 def plot_pstar_hist2d(
     state, out_path: Path, *, n_samples: int = 50_000, seed: int = 999,
+    nbins : int = 200,
     **domain_kwargs,
 ) -> None:
     """2D histogram of log10(p*_true) vs log10(p*_NN)."""
@@ -284,11 +285,12 @@ def plot_pstar_hist2d(
     log_nn = np.asarray(jnp.log10(jnp.maximum(pstar_nn, 1e-30)))
 
     fig, ax = plt.subplots(1, 1, figsize=(6, 5))
-    h = ax.hist2d(log_true, log_nn, bins=100, norm=LogNorm(), cmap="viridis")
+    lims = [min(log_true.min(), log_nn.min()), max(log_true.max(), log_nn.max())]
+    bins = np.linspace(lims[0], lims[1], nbins)
+    h = ax.hist2d(log_true, log_nn, bins=bins, norm=LogNorm(), cmap="viridis")
     fig.colorbar(h[3], ax=ax, label="count")
 
     # Shared axis range and perfect-prediction line
-    lims = [min(log_true.min(), log_nn.min()), max(log_true.max(), log_nn.max())]
     ax.set_xlim(lims)
     ax.set_ylim(lims)
     ax.plot(lims, lims, "r--", linewidth=0.8, alpha=0.7)
