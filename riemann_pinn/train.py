@@ -158,6 +158,23 @@ def residual_loss_normalized(params, apply_fn, gas_states_log):
 
     return loss, {"loss/fstar": loss}
 
+def residual_loss_newton(params, apply_fn, gas_states_log):
+    """Mean squared Newton step (f/f')^2, both evaluated at NN p*.
+
+    f/f' approximates the signed error in p*, so this is a proxy for the
+    mean-squared pressure error without calling the exact solver.
+    """
+    pstar = apply_fn({"params": params}, gas_states_log)
+    gas_states_phys = physics.gas_log_to_phys(gas_states_log)
+    fstar_vals = jax.vmap(physics.fstar)(pstar, gas_states_phys)
+    fprime_vals = jax.vmap(physics.dfstar_dp)(pstar, gas_states_phys)
+    # f' acts as a rescaling weight; don't backprop through it.
+    weight = jax.lax.stop_gradient(fprime_vals)
+    val = (fstar_vals / weight) ** 2
+    loss = jnp.mean(val)
+    return loss, {"loss/newton": loss}
+
+
 def residual_loss_supervised(params, apply_fn, gas_states_log):
     pstar_NN = apply_fn({"params": params}, gas_states_log)
     gas_states_phys = physics.gas_log_to_phys(gas_states_log)

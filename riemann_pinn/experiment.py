@@ -23,6 +23,7 @@ from .train import (
     make_lbfgs_train_step,
     make_train_step,
     residual_loss,
+    residual_loss_newton,
     residual_loss_supervised,
     residual_loss_normalized,
     run_training_loop,
@@ -34,6 +35,7 @@ LOSS_FNS: dict[str, Callable] = {
     "fstar": residual_loss,
     "pstar": residual_loss_supervised,
     "fstar_normalized": residual_loss_normalized,
+    "newton": residual_loss_newton,
 }
 
 STEP_BUILDERS: dict[str, Callable] = {

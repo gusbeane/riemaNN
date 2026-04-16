@@ -1,4 +1,4 @@
-"""MLP: 10k Adam warmup + 1k L-BFGS finisher on the f* residual."""
+"""Normalized-MLP + Newton-step loss ((f/f')^2) on narrowed u domain."""
 
 from riemann_pinn.experiment import Experiment, adam_cosine, lbfgs
 from riemann_pinn.model import StarPressureMLPNormalized
@@ -12,7 +12,6 @@ experiment = Experiment(
     ),
     seed=42,
     phases=[
-        adam_cosine(n_epochs=10_000, lr=4e-3, alpha=1e-4, batch_size=2048, loss="fstar", log_every=200),
-        # lbfgs(n_epochs=15, batch_size=65_536, loss="fstar", log_every=1),
+        adam_cosine(n_epochs=10_000, lr=4e-3, alpha=1e-4, batch_size=2048, loss="newton", log_every=200),
     ],
 )
