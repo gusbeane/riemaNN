@@ -8,15 +8,17 @@ import tomllib
 from pathlib import Path
 
 import jax
+import jax.numpy as jnp
 jax.config.update("jax_enable_x64", True)
 
 import jax.random as jr
 import optax
+from flax.training.train_state import TrainState
 
 from riemann_pinn.model import StarPressureDS, StarPressureMLP
 from riemann_pinn.train import (
     create_train_state, evaluate_holdout,
-    load_checkpoint, load_loss_trace,
+    load_checkpoint, load_loss_trace, make_lbfgs_train_step,
     make_train_step, residual_loss, residual_loss_supervised, run_training_loop, save_checkpoint,
     save_loss_trace, uniform_log,
 )
@@ -56,7 +58,14 @@ def train_model(cfg, model, name):
     domain = cfg["domain"]
     rng = jr.PRNGKey(t["seed"])
     schedule = optax.cosine_decay_schedule(init_value=t["lr"], decay_steps=t["n_epochs"])
-    optimizer = optax.adam(learning_rate=schedule)
+    # optimizer = optax.adam(learning_rate=schedule)
+    optimizer = optax.chain(
+        optax.clip_by_global_norm(1.0),
+        optax.adamw(learning_rate=schedule)
+    )
+    ## ======
+    ## Phase 1: adam warm start
+    ## ======
     state = create_train_state(rng, model, optimizer, batch_size_hint=t["batch_size"])
     
     if t["loss"] == "fstar":
@@ -80,6 +89,27 @@ def train_model(cfg, model, name):
         n_epochs=t["n_epochs"], batch_size=t["batch_size"],
         desc=name, log_every=t["log_every"],
     )
+
+    ## ======
+    ## Phase 2: lbfgs finisher
+    ## ======
+
+    # create new optimizer
+    lbfgs_epochs = t["n_epochs"] // 10
+    lbfgs_opt = optax.lbfgs(learning_rate=1.0, memory_size=10)
+    state = TrainState.create(
+        apply_fn=state.apply_fn, params=state.params, tx=lbfgs_opt,
+    )
+    lbfgs_step = make_lbfgs_train_step(residual_loss)
+    state, trace_lbfgs, _ = run_training_loop(
+        state, lbfgs_step, sampler, jr.fold_in(rng, 2),
+        n_epochs=lbfgs_epochs, batch_size=t["batch_size"],
+        desc=f"{name} lbfgs", log_every=t["log_every"]//10,
+        split_key_every=lbfgs_epochs+1,
+    )
+
+    trace = jnp.concatenate([trace, trace_lbfgs])
+
     return state, trace
 
 

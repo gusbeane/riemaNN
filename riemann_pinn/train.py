@@ -17,6 +17,9 @@ from . import physics
 from .physics import GAS_STATE_DIM
 
 
+import optax
+
+
 # --- sampler ------------------------------------------------------------------
 
 
@@ -126,6 +129,12 @@ def R2_quasirandom(
 
 # --- loss ---------------------------------------------------------------------
 
+def residual_loss_allfstar(params, apply_fn, gas_states_log):
+    raw = apply_fn({"params": params}, gas_states_log)
+    pstar = 10.0 ** raw
+    gas_states_phys = physics.gas_log_to_phys(gas_states_log)
+    fstar_vals = jax.vmap(physics.fstar)(pstar, gas_states_phys)
+    return jnp.abs(fstar_vals)
 
 def residual_loss(params, apply_fn, gas_states_log):
     """Mean squared f(p*) residual. Returns (loss, metrics)."""
@@ -133,7 +142,9 @@ def residual_loss(params, apply_fn, gas_states_log):
     pstar = 10.0 ** raw
     gas_states_phys = physics.gas_log_to_phys(gas_states_log)
     fstar_vals = jax.vmap(physics.fstar)(pstar, gas_states_phys)
-    loss = jnp.mean(fstar_vals ** 2)
+    val = fstar_vals**2
+    loss = jnp.mean(val)
+
     return loss, {"loss/fstar": loss}
 
 def residual_loss_supervised(params, apply_fn, gas_states_log):
@@ -174,20 +185,46 @@ def make_train_step(loss_fn: Callable) -> Callable:
 
     return train_step
 
+def make_lbfgs_train_step(loss_fn: Callable) -> Callable:
+    @jax.jit
+    def train_step(state, gas_states_log):
+        def value_fn(params):
+            loss, _ = loss_fn(params, state.apply_fn, gas_states_log)
+            return loss
+
+        (loss, metrics), grads = jax.value_and_grad(
+            lambda p: loss_fn(p, state.apply_fn, gas_states_log), has_aux=True,
+        )(state.params)
+
+        updates, new_opt_state = state.tx.update(
+            grads, state.opt_state, state.params,
+            value=loss, grad=grads, value_fn=value_fn,
+        )
+        new_params = optax.apply_updates(state.params, updates)
+
+        return state.replace(
+            step = state.step + 1, params=new_params, opt_state=new_opt_state
+        ), loss, metrics
+    
+    return train_step
+
+
 
 def run_training_loop(
     state, train_step, sampler, rng, n_epochs, batch_size,
-    *, log_every=100, desc="train",
+    *, log_every=100, desc="train", split_key_every=1
 ):
     loss_trace: list[float] = []
     pbar = tqdm(range(n_epochs), desc=desc)
     for epoch in pbar:
-        rng, batch_key = jr.split(rng)
+        if (epoch % split_key_every) == 0:
+            rng, batch_key = jr.split(rng)
         batch = sampler(batch_key, batch_size)
         state, loss, _metrics = train_step(state, batch)
         loss_trace.append(float(loss))
         if epoch % log_every == 0:
             pbar.set_postfix(loss=f"{loss:.2e}")
+
     return state, jnp.array(loss_trace)
 
 
@@ -236,14 +273,11 @@ def evaluate_holdout(state, n_samples=20_000, seed=999, **domain_kwargs):
 
     # Pressure error vs exact solver
     pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states_phys)
-    pos = (pstar_true > 1e-30) & (pstar_nn > 1e-30)
     dlogp = jnp.log10(pstar_nn) - jnp.log10(pstar_true)
     abs_dlogp = jnp.abs(dlogp)
-    abs_dlogp = jnp.where(pos, abs_dlogp, jnp.nan)
     abs_dlogp_np = np.asarray(abs_dlogp)
     metrics["median_abs_delta_log10_p"] = float(np.nanmedian(abs_dlogp_np))
     metrics["p95_abs_delta_log10_p"] = float(np.nanpercentile(abs_dlogp_np, 95.0))
-    metrics["frac_both_p_positive"] = float(jnp.mean(pos))
 
     abs_absolute = jnp.abs(pstar_nn - pstar_true)
     metrics["abs_absolute_median"] = float(np.nanmedian(abs_absolute))
@@ -254,5 +288,10 @@ def evaluate_holdout(state, n_samples=20_000, seed=999, **domain_kwargs):
     any_nan_true = bool(jnp.any(jnp.isnan(pstar_true)))
     metrics["any_nan_nn"] = "true" if any_nan_nn else "false"
     metrics["any_nan_true"] = "true" if any_nan_true else "false"
+
+    any_neg_nn = bool(jnp.any(pstar_nn < 0))
+    any_neg_true = bool(jnp.any(pstar_true < 0))
+    metrics["any_neg_nn"] = "true" if any_neg_nn else "false"
+    metrics["any_neg_true"] = "true" if any_neg_true else "false"
 
     return metrics
