@@ -185,3 +185,10 @@ def gas_log_to_phys(gas_states_log):
     )
 
 
+def gas_phys_to_log(gas_states_phys):
+    """(batch, 5) physical (rhoL,pL,rhoR,pR,uRL) -> log10(rhoL,pL,rhoR,pR) + uRL."""
+    return jnp.concatenate(
+        [jnp.log10(gas_states_phys[:, :4]), gas_states_phys[:, 4:5]], axis=-1
+    )
+
+

@@ -10,6 +10,8 @@ from typing import Callable
 import flax.linen as nn
 import jax.numpy as jnp
 
+from . import physics
+
 class _MLP(nn.Module):
     """Small reusable MLP block."""
     width: int = 64
@@ -43,6 +45,48 @@ class StarPressureMLP(nn.Module):
             x = x.squeeze(-1)
 
         return 10.0 ** x
+
+
+class StarPressureMLPNormalized(nn.Module):
+    """MLP that normalizes inputs/targets by state-dependent reference scales.
+
+    Input x is (B, 5) in mixed form:
+      (log10 rhoL, log10 pL, log10 rhoR, log10 pR, uRL).
+
+    The network consumes:
+      (log10(rhoL/rho_ref), log10(pL/p_ref),
+       log10(rhoR/rho_ref), log10(pR/p_ref), uRL/u_ref),
+    predicts log10(p*/p_ref), and returns physical p*.
+    """
+
+    width: int = 64
+    depth: int = 2
+    activation: Callable = nn.silu
+
+    @nn.compact
+    def __call__(self, x):
+        model = _MLP(
+            width=self.width,
+            depth=self.depth,
+            activation=self.activation,
+            output_dim=1,
+        )
+
+        gas_phys = physics.gas_log_to_phys(x)
+        rhoL, pL, rhoR, pR, uRL = jnp.split(gas_phys, [1, 2, 3, 4], axis=-1)
+
+        rho_ref = 0.5 * (rhoL + rhoR)
+        p_ref = 0.5 * (pL + pR)
+        u_ref = physics.sound_speed(p_ref, rho_ref)
+
+        gas_phys_norm = jnp.concatenate(
+            [rhoL / rho_ref, pL / p_ref, rhoR / rho_ref, pR / p_ref, uRL / u_ref],
+            axis=-1,
+        )
+        x_norm = physics.gas_phys_to_log(gas_phys_norm)
+
+        log_pstar_over_pref = model(x_norm).squeeze(-1)
+        return p_ref.squeeze(-1) * (10.0 ** log_pstar_over_pref)
 
 class StarPressureDS(nn.Module):
     """Deep Set that predicts p* from a log-space gas state.
