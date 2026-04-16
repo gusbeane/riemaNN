@@ -20,6 +20,16 @@ MU: float = (GAMMA - 1.0) / 2.0
 
 GAS_STATE_DIM: int = 5
 
+@jax.jit
+def sound_speed(p, rho):
+    return jnp.sqrt(GAMMA*p/rho)
+
+@jax.jit
+def ref_sound_speed(gas_state):
+    rhoL, pL, rhoR, pR, _uRL = gas_state
+    cL = sound_speed(pL, rhoL)
+    cR = sound_speed(pR, rhoR)
+    return 0.5*(cL + cR)
 
 @jax.jit
 def fjump(p, pK, rhoK):

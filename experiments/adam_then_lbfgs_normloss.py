@@ -10,9 +10,10 @@ experiment = Experiment(
         log_p_range=(0.0, 2.0),
         u_range=(-1.0, 1.0),
     ),
+    corner_every=200,
     seed=42,
     phases=[
-        adam_cosine(n_epochs=10_000, lr=4e-3, alpha=1e-4, batch_size=2048, loss="fstar", log_every=200),
+        adam_cosine(n_epochs=10_000, lr=4e-3, alpha=1e-6, batch_size=2048, loss="fstar_normalized", log_every=200),
         # lbfgs(n_epochs=15, batch_size=65_536, loss="fstar", log_every=1),
     ],
 )

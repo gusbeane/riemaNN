@@ -147,6 +147,20 @@ def residual_loss(params, apply_fn, gas_states_log):
 
     return loss, {"loss/fstar": loss}
 
+def residual_loss_normalized(params, apply_fn, gas_states_log):
+    """Mean squared f(p*) residual. Returns (loss, metrics)."""
+    raw = apply_fn({"params": params}, gas_states_log)
+    pstar = 10.0 ** raw
+    gas_states_phys = physics.gas_log_to_phys(gas_states_log)
+    fstar_vals = jax.vmap(physics.fstar)(pstar, gas_states_phys)
+    cref_vals = jax.vmap(physics.ref_sound_speed)(gas_states_phys)
+    # pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states_phys)
+    # val = fstar_vals**2 / pstar_true**2
+    val = fstar_vals**2 / cref_vals**2
+    loss = jnp.mean(val)
+
+    return loss, {"loss/fstar": loss}
+
 def residual_loss_supervised(params, apply_fn, gas_states_log):
     raw = apply_fn({"params": params}, gas_states_log)
     pstar_NN = 10.0 ** raw

@@ -24,6 +24,7 @@ from .train import (
     make_train_step,
     residual_loss,
     residual_loss_supervised,
+    residual_loss_normalized,
     run_training_loop,
     uniform_log,
 )
@@ -32,6 +33,7 @@ from .train import (
 LOSS_FNS: dict[str, Callable] = {
     "fstar": residual_loss,
     "pstar": residual_loss_supervised,
+    "fstar_normalized": residual_loss_normalized,
 }
 
 STEP_BUILDERS: dict[str, Callable] = {
@@ -72,6 +74,7 @@ class Experiment:
     domain: dict
     phases: list[Phase]
     seed: int = 42
+    corner_every: int = 100
 
 
 # --- phase factories ----------------------------------------------------------
@@ -81,6 +84,7 @@ def adam_cosine(
     *,
     n_epochs: int,
     lr: float = 1e-3,
+    alpha: float = None,
     batch_size: int = 256,
     loss: str = "fstar",
     weight_decay: float = 1e-4,
@@ -90,7 +94,7 @@ def adam_cosine(
     name: str = "adam_cosine",
 ) -> Phase:
     """AdamW with cosine-decayed LR and global-norm clipping."""
-    schedule = optax.cosine_decay_schedule(init_value=lr, decay_steps=n_epochs)
+    schedule = optax.cosine_decay_schedule(init_value=lr, decay_steps=n_epochs, alpha=alpha)
     tx = optax.chain(
         optax.clip_by_global_norm(clip_norm),
         optax.adamw(learning_rate=schedule, weight_decay=weight_decay),
@@ -163,13 +167,19 @@ def lbfgs(
 # --- runner -------------------------------------------------------------------
 
 
-def run_experiment(exp: Experiment):
-    """Execute all phases. Returns (final_state, full_loss_trace, per_phase_traces)."""
+def run_experiment(exp: Experiment, *, corner_callback: Optional[Callable] = None):
+    """Execute all phases. Returns (final_state, full_loss_trace, per_phase_traces).
+
+    If ``corner_callback`` is given, it is invoked as ``corner_callback(state, step)``
+    every ``exp.corner_every`` global training steps. The step counter persists
+    across phase boundaries.
+    """
     rng = jr.PRNGKey(exp.seed)
 
     state = None
     traces: list[jnp.ndarray] = []
     n_phases = len(exp.phases)
+    global_step_offset = 0
     for i, phase in enumerate(exp.phases):
         if state is None:
             state = create_train_state(
@@ -186,6 +196,14 @@ def run_experiment(exp: Experiment):
         def sampler(key, batch_size, _fn=sampler_fn):
             return _fn(key, batch_size, **exp.domain)
 
+        if corner_callback is not None:
+            every = exp.corner_every
+            def step_cb(s, global_step, _cb=corner_callback, _every=every):
+                if global_step % _every == 0:
+                    _cb(s, global_step)
+        else:
+            step_cb = None
+
         phase_rng = jr.fold_in(rng, i + 1)
         desc = f"[{i + 1}/{n_phases}] {phase.name}"
         state, trace = run_training_loop(
@@ -193,8 +211,10 @@ def run_experiment(exp: Experiment):
             n_epochs=phase.n_epochs, batch_size=phase.batch_size,
             desc=desc, log_every=phase.log_every,
             split_key_every=phase.split_key_every,
+            step_callback=step_cb, step_offset=global_step_offset,
         )
         traces.append(trace)
+        global_step_offset += phase.n_epochs
 
     full_trace = jnp.concatenate(traces) if traces else jnp.array([])
     return state, full_trace, traces
