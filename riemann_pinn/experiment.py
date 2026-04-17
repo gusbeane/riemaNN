@@ -78,6 +78,9 @@ class Experiment:
     seed: int = 42
     corner_every: int = 100
     name: Optional[str] = None
+    # Sampling domain during training. If None, falls back to `domain`.
+    # Set wider than `domain` to include samples outside the test region.
+    train_domain: Optional[dict] = None
 
 
 # --- phase factories ----------------------------------------------------------
@@ -196,8 +199,9 @@ def run_experiment(exp: Experiment, *, corner_callback: Optional[Callable] = Non
         loss_fn = LOSS_FNS[phase.loss]
         step = STEP_BUILDERS[phase.step_kind](loss_fn)
         sampler_fn = SAMPLERS[phase.sampler]
-        def sampler(key, batch_size, _fn=sampler_fn):
-            return _fn(key, batch_size, **exp.domain)
+        train_domain = exp.train_domain if exp.train_domain is not None else exp.domain
+        def sampler(key, batch_size, _fn=sampler_fn, _dom=train_domain):
+            return _fn(key, batch_size, **_dom)
 
         if corner_callback is not None:
             every = exp.corner_every
