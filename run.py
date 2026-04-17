@@ -49,6 +49,7 @@ def main():
     ap.add_argument("experiment", help="path to Python experiment file")
     ap.add_argument("--retrain", action="store_true", help="ignore checkpoint")
     ap.add_argument("--skip-plots", action="store_true")
+    ap.add_argument("--plot-corner-trace", action="store_true")
     args = ap.parse_args()
 
     exp_path = Path(args.experiment)
@@ -72,7 +73,7 @@ def main():
             plot_corner_error(
                 s, frames_dir / f"corner_error_{step:07d}.png", **exp.domain,
             )
-        cb = None if args.skip_plots else corner_cb
+        cb = corner_cb if args.plot_corner_trace else None
         t0 = time.monotonic()
         state, loss_trace, _ = run_experiment(exp, corner_callback=cb)
         training_time_s = round(time.monotonic() - t0, 1)
