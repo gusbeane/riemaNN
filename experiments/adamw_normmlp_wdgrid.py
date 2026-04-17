@@ -18,21 +18,22 @@ _DOMAIN = dict(
 
 _WIDTHS = [64, 128, 256]
 _DEPTHS = [2, 3, 4]
+_LRS = [2e-3, 4e-3, 8e-3]
 
 
-def _make(width: int, depth: int) -> Experiment:
+def _make(width: int, depth: int, lr: float) -> Experiment:
     return Experiment(
         model=StarPressureMLPNormalized(width=width, depth=depth),
         domain=_DOMAIN,
         seed=42,
-        name=f"w{width}_d{depth}",
+        name=f"w{width}_d{depth}_lr{lr}",
         phases=[
             adam_cosine(
-                n_epochs=10_000, lr=4e-3, alpha=0.0, batch_size=2048,
+                n_epochs=10_000, lr=lr, alpha=0.0, batch_size=2048,
                 loss="fstar", log_every=200,
             ),
         ],
     )
 
 
-experiments = [_make(w, d) for w, d in product(_WIDTHS, _DEPTHS)]
+experiments = [_make(w, d, lr) for w, d, lr in product(_WIDTHS, _DEPTHS, _LRS)]
