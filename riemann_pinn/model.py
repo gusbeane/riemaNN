@@ -8,6 +8,7 @@ log transform.
 from typing import Callable
 
 import flax.linen as nn
+import jax
 import jax.numpy as jnp
 
 from . import physics
@@ -87,6 +88,93 @@ class StarPressureMLPNormalized(nn.Module):
 
         log_pstar_over_pref = model(x_norm).squeeze(-1)
         return p_ref.squeeze(-1) * (10.0 ** log_pstar_over_pref)
+
+class SirenMLP(nn.Module):
+    """SIREN: MLP with sine activations.
+
+    Known to represent smooth functions to very low MSE.  First layer uses
+    the Sitzmann-recommended uniform init U(-1/n_in, 1/n_in) and applies
+    sin(w0 * x) with w0=30 to bias the network toward higher frequencies.
+    """
+
+    width: int = 256
+    depth: int = 3
+    w0: float = 30.0
+    output_dim: int = 1  # scalar log10 p*
+
+    @nn.compact
+    def __call__(self, x):
+        n_in = x.shape[-1]
+
+        # SIREN-specific init for the first layer.
+        def siren_init_first(key, shape, dtype=jnp.float32):
+            import jax.random as jr
+            return jr.uniform(key, shape, dtype=dtype,
+                              minval=-1.0 / n_in, maxval=1.0 / n_in)
+
+        def siren_init_hidden(key, shape, dtype=jnp.float32):
+            import jax.random as jr
+            fan_in = shape[0]
+            bound = jnp.sqrt(6.0 / fan_in) / self.w0
+            return jr.uniform(key, shape, dtype=dtype, minval=-bound, maxval=bound)
+
+        # First layer with special init
+        h = nn.Dense(self.width, kernel_init=siren_init_first)(x)
+        h = jnp.sin(self.w0 * h)
+
+        # Hidden layers
+        for _ in range(self.depth - 1):
+            h = nn.Dense(self.width, kernel_init=siren_init_hidden)(h)
+            h = jnp.sin(self.w0 * h)
+
+        out = nn.Dense(self.output_dim, kernel_init=siren_init_hidden)(h)
+        if self.output_dim == 1:
+            out = out.squeeze(-1)
+        return 10.0 ** out
+
+
+class FourierFeatureMLP(nn.Module):
+    """MLP with random Fourier feature encoding on inputs.
+
+    Encodes x via (sin(Bx), cos(Bx)) with B a fixed random matrix drawn once
+    at init, then feeds the encoding through a plain MLP. Fourier features
+    help MLPs represent high-frequency smooth functions (NERF-style).
+    """
+
+    width: int = 256
+    depth: int = 3
+    n_freq: int = 64
+    freq_scale: float = 4.0  # std of random frequencies
+    activation: Callable = nn.silu
+
+    @nn.compact
+    def __call__(self, x):
+        # Frozen random projection B: (5, n_freq). We register it as a
+        # non-trainable variable so it doesn't update.
+        B = self.param(
+            "fourier_B",
+            lambda key, shape: freq_scale_init(key, shape, self.freq_scale),
+            (x.shape[-1], self.n_freq),
+        )
+        B_frozen = jax.lax.stop_gradient(B)
+        proj = x @ B_frozen  # (B, n_freq)
+        features = jnp.concatenate([jnp.sin(2 * jnp.pi * proj),
+                                    jnp.cos(2 * jnp.pi * proj)],
+                                   axis=-1)
+        # Also include the raw input so low-frequency info is preserved.
+        features = jnp.concatenate([x, features], axis=-1)
+
+        h = features
+        for _ in range(self.depth):
+            h = nn.Dense(self.width)(h)
+            h = self.activation(h)
+        return 10.0 ** nn.Dense(1)(h).squeeze(-1)
+
+
+def freq_scale_init(key, shape, scale):
+    import jax.random as jr
+    return scale * jr.normal(key, shape)
+
 
 class StarPressureDS(nn.Module):
     """Deep Set that predicts p* from a log-space gas state.

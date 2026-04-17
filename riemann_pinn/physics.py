@@ -153,6 +153,30 @@ def find_pstar(gas_state):
 
 
 @jax.jit
+def find_pstar_precise(gas_state):
+    """High-precision p*: calls find_pstar for convergence, then polishes
+    with extra Newton steps to push the residual down to float64 epsilon.
+
+    Newton converges quadratically, so starting from |f| < 1e-6 gives
+    |f| ~ 1e-12 in one step and machine precision in two.
+    """
+    p_est, _ = find_pstar(gas_state)
+
+    # Unconditionally run 3 Newton steps from the converged estimate.
+    # Each step is O(1) work; convergence is quadratic from the basin.
+    def body(_, p):
+        f = fstar(p, gas_state)
+        df = dfstar_dp(p, gas_state)
+        # Safe step: if df is 0 (shouldn't happen for a converged point), leave p alone.
+        df = jnp.where(jnp.abs(df) < 1e-30, 1.0, df)
+        return p - f / df
+
+    p_polish = jax.lax.fori_loop(0, 3, body, p_est)
+    f_polish = fstar(p_polish, gas_state)
+    return p_polish, f_polish
+
+
+@jax.jit
 def find_ustar(gas_state, pstar):
     """Star-region velocity u* = 0.5 * (uRL + fR(p*) - fL(p*)) in the uRL=uR-uL convention.
 
