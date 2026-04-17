@@ -38,7 +38,7 @@ def plot_loss(loss_trace, out_path: Path, *, title: str = "Training loss") -> No
 def plot_slice(
     state, out_path: Path, *, n: int = 250,
     log_rho_range=(-1.0, 2.0), log_p_range=(-2.0, 2.0),
-    err_range=(-0.1, 0.1), nbins=100,
+    err_range=(-0.1, 0.1), nbins=100, name: str | None = None,
 ) -> None:
     """Two-panel heatmap: log10(p_NN/p_true) and signed log|f(p_NN)|."""
     # Build 2D grid over (log rhoL, log pL) with right state and uRL fixed
@@ -94,6 +94,8 @@ def plot_slice(
 
     ax.hist(log_ratio_sym, bins=bins, histtype='step', ec='b', density=True)
 
+    if name:
+        fig.suptitle(name)
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -142,6 +144,7 @@ def _corner_panels(n, *, log_rho_range, log_p_range, u_range):
 def plot_corner_error(
     state, out_path: Path, *, n: int = 50,
     log_rho_range=(0.0, 2.0), log_p_range=(-2.0, 2.0), u_range=(-1.0, 1.0),
+    name: str | None = None,
 ) -> None:
     """Corner plot of log10(p*_NN / p*_true) over all input variable pairs."""
     panels, axes_np = _corner_panels(
@@ -194,6 +197,8 @@ def plot_corner_error(
         label=r"$\log_{10}(p^*_{\mathrm{NN}}/p^*_{\mathrm{true}})$",
         shrink=0.6, pad=0.02,
     )
+    if name:
+        fig.suptitle(name)
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -203,6 +208,7 @@ def plot_corner_error(
 def plot_corner_pstar(
     out_path: Path, *, n: int = 50,
     log_rho_range=(0.0, 2.0), log_p_range=(-2.0, 2.0), u_range=(-1.0, 1.0),
+    name: str | None = None,
 ) -> None:
     """Corner plot of log10(p*_true) over all input variable pairs."""
     panels, axes_np = _corner_panels(
@@ -256,6 +262,8 @@ def plot_corner_pstar(
         label=r"$\log_{10}\,p^*_{\mathrm{true}}$",
         shrink=0.6, pad=0.02,
     )
+    if name:
+        fig.suptitle(name)
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
@@ -264,7 +272,7 @@ def plot_corner_pstar(
 
 def plot_pstar_hist2d(
     state, out_path: Path, *, n_samples: int = 50_000, seed: int = 999,
-    nbins : int = 200,
+    nbins : int = 200, name: str | None = None,
     **domain_kwargs,
 ) -> None:
     """2D histogram of log10(p*_true) vs log10(p*_NN)."""
@@ -293,7 +301,10 @@ def plot_pstar_hist2d(
 
     ax.set_xlabel(r"$\log_{10}\,p^*_{\mathrm{true}}$")
     ax.set_ylabel(r"$\log_{10}\,p^*_{\mathrm{NN}}$")
-    ax.set_title(r"$p^*$ prediction vs truth")
+    title = r"$p^*$ prediction vs truth"
+    if name:
+        title = f"{title} — {name}"
+    ax.set_title(title)
     ax.set_aspect("equal")
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)

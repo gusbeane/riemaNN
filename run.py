@@ -274,7 +274,8 @@ def _train_and_eval(exp: Experiment, exp_path: Path, out_dir: Path, name: str,
         frames_dir = plots_dir / "corner_frames"
         def corner_cb(s, step):
             plot_corner_error(
-                s, frames_dir / f"corner_error_{step:07d}.png", **exp.domain,
+                s, frames_dir / f"corner_error_{step:07d}.png",
+                name=f"{name} @ step {step}", **exp.domain,
             )
         cb = corner_cb if plot_corner_trace else None
         t0 = time.monotonic()
@@ -302,10 +303,11 @@ def _train_and_eval(exp: Experiment, exp_path: Path, out_dir: Path, name: str,
         state, plots_dir / "slice.png",
         log_rho_range=exp.domain["log_rho_range"],
         log_p_range=exp.domain["log_p_range"],
+        name=name,
     )
-    plot_pstar_hist2d(state, plots_dir / "pstar_hist2d.png", **exp.domain)
-    plot_corner_error(state, plots_dir / "corner_error.png", **exp.domain)
-    plot_corner_pstar(plots_dir / "corner_pstar.png", **exp.domain)
+    plot_pstar_hist2d(state, plots_dir / "pstar_hist2d.png", name=name, **exp.domain)
+    plot_corner_error(state, plots_dir / "corner_error.png", name=name, **exp.domain)
+    plot_corner_pstar(plots_dir / "corner_pstar.png", name=name, **exp.domain)
 
 
 def main():
