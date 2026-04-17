@@ -1,7 +1,6 @@
 """Run a PINN training experiment defined by a Python file."""
 
 import argparse
-import dataclasses
 import importlib.util
 import json
 import shutil
@@ -117,64 +116,22 @@ def _experiment_out_dir(root: Path, stem: str, exp: Experiment, is_list: bool) -
 
 # --- metrics printing ---------------------------------------------------------
 
-
-def _hashable(v: Any) -> Any:
-    """Coerce a value to something hashable (for set-based diffing)."""
-    if callable(v):
-        return getattr(v, "__name__", repr(v))
-    if isinstance(v, (list, tuple)):
-        return tuple(_hashable(x) for x in v)
-    if isinstance(v, dict):
-        return tuple(sorted((k, _hashable(x)) for k, x in v.items()))
-    try:
-        hash(v)
-        return v
-    except TypeError:
-        return repr(v)
-
-
-def _flatten_config(exp: Experiment) -> dict[str, Any]:
-    """Dict of comparable config knobs for one experiment.
-
-    Includes the model class + its dataclass fields, domain, seed, and per-phase
-    fields (excluding the opaque optimizer). Callables are represented by name.
-    """
-    d: dict[str, Any] = {"model.__class__": type(exp.model).__name__}
-    for f in dataclasses.fields(exp.model):
-        if f.name in ("parent", "name"):
-            continue
-        try:
-            v = getattr(exp.model, f.name)
-        except AttributeError:
-            continue
-        d[f"model.{f.name}"] = _hashable(v)
-    for k, v in exp.domain.items():
-        d[f"domain.{k}"] = _hashable(v)
-    d["seed"] = exp.seed
-    d["n_phases"] = len(exp.phases)
-    for i, p in enumerate(exp.phases):
-        for f in dataclasses.fields(p):
-            if f.name == "optimizer":
-                continue
-            d[f"p{i}.{f.name}"] = _hashable(getattr(p, f.name))
-    return d
-
-
-def _varying_keys(exps: list[Experiment]) -> list[str]:
-    """Config keys whose values differ across at least two experiments."""
-    flats = [_flatten_config(e) for e in exps]
-    keys = sorted(set().union(*(f.keys() for f in flats)))
-    varying: list[str] = []
-    for k in keys:
-        vals = {f.get(k, "<missing>") for f in flats}
-        if len(vals) > 1:
-            varying.append(k)
-    return varying
-
-
-def _short_key(key: str) -> str:
-    """Drop the ``model.`` prefix for cleaner column headers."""
-    return key[6:] if key.startswith("model.") else key
+# Compact column labels for metrics coming out of evaluate_holdout. Keys not
+# present here fall back to their raw name.
+_METRIC_LABELS: dict[str, str] = {
+    "median_abs_fstar":          "med|f(p*)|",
+    "p95_abs_fstar":             "p95|f(p*)|",
+    "median_abs_delta_log10_p":  "med|dlog10p*|",
+    "p95_abs_delta_log10_p":     "p95|dlog10p*|",
+    "abs_absolute_median":       "med|dp*|",
+    "abs_absolute_p5":           "p5|dp*|",
+    "abs_absolute_p95":          "p95|dp*|",
+    "any_nan_nn":                "nan_nn",
+    "any_nan_true":              "nan_tr",
+    "any_neg_nn":                "neg_nn",
+    "any_neg_true":              "neg_tr",
+    "training_time_s":           "t (s)",
+}
 
 
 def _fmt_cell(v: Any) -> str:
@@ -182,8 +139,6 @@ def _fmt_cell(v: Any) -> str:
         return "nr"
     if isinstance(v, float):
         return f"{v:.4g}"
-    if isinstance(v, tuple):
-        return "(" + ",".join(_fmt_cell(x) for x in v) + ")"
     return str(v)
 
 
@@ -219,13 +174,11 @@ def print_metrics(exps: list[Experiment], is_list: bool, stem: str,
         if m is None:
             print(f"{stem}: nr (no metrics.json in {out_root / stem})")
             return
-        width = max(len(k) for k in m) if m else 0
+        width = max(len(_METRIC_LABELS.get(k, k)) for k in m) if m else 0
         for k in sorted(m):
-            print(f"{k:<{width}}  {_fmt_cell(m[k])}")
+            label = _METRIC_LABELS.get(k, k)
+            print(f"{label:<{width}}  {_fmt_cell(m[k])}")
         return
-
-    varying_full = _varying_keys(exps)
-    varying = [_short_key(k) for k in varying_full]
 
     # Metric columns: union across loaded runs, sorted; drop all-false booleans
     metric_keys: set[str] = set()
@@ -237,20 +190,17 @@ def print_metrics(exps: list[Experiment], is_list: bool, stem: str,
         if vals and vals.issubset({"false"}):
             metric_keys.discard(k)
     metric_cols = sorted(metric_keys)
-    # Pull training_time_s to the end if present
     if "training_time_s" in metric_cols:
         metric_cols.remove("training_time_s")
         metric_cols.append("training_time_s")
 
-    header = ["name"] + varying + metric_cols
+    header = ["name"] + [_METRIC_LABELS.get(k, k) for k in metric_cols]
     rows: list[list[str]] = []
     for e, m in zip(exps, loaded):
-        cfg = _flatten_config(e)
-        row = [e.name] + [_fmt_cell(cfg.get(k)) for k in varying_full]
         if m is None:
-            row += ["nr"] * len(metric_cols)
+            row = [e.name] + ["nr"] * len(metric_cols)
         else:
-            row += [_fmt_cell(m.get(k)) for k in metric_cols]
+            row = [e.name] + [_fmt_cell(m.get(k)) for k in metric_cols]
         rows.append(row)
 
     _print_table(rows, header)
