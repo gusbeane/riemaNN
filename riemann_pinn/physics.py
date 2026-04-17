@@ -57,18 +57,20 @@ def _newton(gas_state, p0):
     """Newton iteration for p*. Fast but can diverge."""
 
     def cond(state):
-        pstar, fstar_, i = state
-        return (jnp.abs(fstar_) >= 1e-6) & (i < 100)
+        pstar, pstar_prev, fstar_, i = state
+        return (jnp.abs(fstar_) >= 1e-12) & (jnp.abs(pstar - pstar_prev) >= 1e-10) & (i < 100)
 
     def body(state):
-        pstar, _, i = state
+        pstar, _pstar_prev, _, i = state
+        pstar_prev = pstar
         fstar_ = fstar(pstar, gas_state)
         dfstar_ = dfstar_dp(pstar, gas_state)
         pstar = pstar - fstar_ / dfstar_
-        return pstar, fstar(pstar, gas_state), i + 1
+        return pstar, pstar_prev, fstar(pstar, gas_state), i + 1
 
-    init = (p0, fstar(p0, gas_state), 0)
-    pstar, fstar_final, _ = jax.lax.while_loop(cond, body, init)
+    # state = (pguess, pguess_prev, fstar, i)
+    init = (p0, jnp.inf, fstar(p0, gas_state), 0)
+    pstar, _pstar_prev, fstar_final, _ = jax.lax.while_loop(cond, body, init)
     return pstar, fstar_final
 
 
@@ -141,7 +143,7 @@ def find_pstar(gas_state):
     p_newton, f_newton = _newton(gas_state, p0)
 
     newton_ok = (jnp.isfinite(p_newton) & jnp.isfinite(f_newton)
-                 & (p_newton > 0) & (jnp.abs(f_newton) < 1e-6))
+                 & (p_newton > 0) & (jnp.abs(f_newton) < 1e-12))
 
     p_bisect, f_bisect = jax.lax.cond(
         newton_ok,
