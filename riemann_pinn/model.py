@@ -88,6 +88,51 @@ class StarPressureMLPNormalized(nn.Module):
         log_pstar_over_pref = model(x_norm).squeeze(-1)
         return p_ref.squeeze(-1) * (10.0 ** log_pstar_over_pref)
 
+
+class StarPressureMLPNormalizedGeom(nn.Module):
+    """Like StarPressureMLPNormalized but uses the geometric mean for refs.
+
+    rho_ref = sqrt(rhoL * rhoR), p_ref = sqrt(pL * pR), u_ref = c_s(p_ref, rho_ref).
+    Since inputs arrive in log space, the log-ref is just the arithmetic mean of
+    (log rhoL, log rhoR) (and similarly for p), which avoids a round-trip through
+    physical space and also produces inputs that are antisymmetric under L<->R.
+    """
+
+    width: int = 64
+    depth: int = 2
+    activation: Callable = nn.silu
+
+    @nn.compact
+    def __call__(self, x):
+        model = _MLP(
+            width=self.width,
+            depth=self.depth,
+            activation=self.activation,
+            output_dim=1,
+        )
+
+        log_rhoL, log_pL, log_rhoR, log_pR, uRL = jnp.split(x, 5, axis=-1)
+        log_rho_ref = 0.5 * (log_rhoL + log_rhoR)
+        log_p_ref = 0.5 * (log_pL + log_pR)
+        p_ref = 10.0 ** log_p_ref
+        rho_ref = 10.0 ** log_rho_ref
+        u_ref = physics.sound_speed(p_ref, rho_ref)
+
+        x_norm = jnp.concatenate(
+            [
+                log_rhoL - log_rho_ref,
+                log_pL - log_p_ref,
+                log_rhoR - log_rho_ref,
+                log_pR - log_p_ref,
+                uRL / u_ref,
+            ],
+            axis=-1,
+        )
+
+        log_pstar_over_pref = model(x_norm).squeeze(-1)
+        return p_ref.squeeze(-1) * (10.0 ** log_pstar_over_pref)
+
+
 class StarPressureDS(nn.Module):
     """Deep Set that predicts p* from a log-space gas state.
 
