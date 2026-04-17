@@ -1,11 +1,13 @@
 """Run a PINN training experiment defined by a Python file."""
 
 import argparse
+import dataclasses
 import importlib.util
 import json
 import shutil
 import time
 from pathlib import Path
+from typing import Any
 
 import jax
 
@@ -28,13 +30,14 @@ from riemann_pinn.train import (
 )
 
 
-def load_experiment(path: Path, index: int | None) -> tuple[Experiment, bool]:
+def load_experiments(path: Path) -> tuple[list[Experiment], bool]:
     """Load an experiment module.
 
     The module must define either a single ``experiment = Experiment(...)`` or
-    a list ``experiments = [Experiment(...), ...]``. Returns ``(exp, is_list)``;
-    for list-valued modules, each experiment is required to carry a ``name``
-    and ``index`` selects which one to return.
+    a list ``experiments = [Experiment(...), ...]``. Returns
+    ``(experiments, is_list)``: a single-valued module is normalized to a
+    one-element list with ``is_list=False``. For list-valued modules, every
+    entry must carry a unique ``name``.
     """
     spec = importlib.util.spec_from_file_location("_experiment", path)
     if spec is None or spec.loader is None:
@@ -55,17 +58,13 @@ def load_experiment(path: Path, index: int | None) -> tuple[Experiment, bool]:
         )
 
     if has_single:
-        if index is not None:
-            raise ValueError(
-                f"{path}: defines a single `experiment`; --index is not allowed"
-            )
         exp = module.experiment
         if not isinstance(exp, Experiment):
             raise TypeError(
                 f"{path}: `experiment` must be an Experiment instance, "
                 f"got {type(exp).__name__}"
             )
-        return exp, False
+        return [exp], False
 
     exps = module.experiments
     if not isinstance(exps, (list, tuple)) or not exps:
@@ -85,45 +84,189 @@ def load_experiment(path: Path, index: int | None) -> tuple[Experiment, bool]:
     names = [e.name for e in exps]
     if len(set(names)) != len(names):
         raise ValueError(f"{path}: duplicate names in `experiments`: {names}")
+    return list(exps), True
 
+
+def select_index(exps: list[Experiment], is_list: bool, index: int | None,
+                 path: Path) -> int:
+    """Resolve an --index request against a loaded list.
+
+    Required for lists; forbidden for single-experiment files.
+    """
+    if not is_list:
+        if index is not None:
+            raise ValueError(
+                f"{path}: defines a single `experiment`; --index is not allowed"
+            )
+        return 0
     if index is None:
         raise ValueError(
             f"{path}: defines `experiments` (list of {len(exps)}); --index is required. "
-            f"Available: {list(enumerate(names))}"
+            f"Available: {list(enumerate(e.name for e in exps))}"
         )
     if not 0 <= index < len(exps):
         raise IndexError(
             f"{path}: --index {index} out of range [0, {len(exps)})"
         )
-    return exps[index], True
+    return index
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("experiment", help="path to Python experiment file")
-    ap.add_argument("--index", type=int, default=None,
-                    help="select experiments[N] when the file defines a list")
-    ap.add_argument("--retrain", action="store_true", help="ignore checkpoint")
-    ap.add_argument("--skip-plots", action="store_true")
-    ap.add_argument("--plot-corner-trace", action="store_true")
-    args = ap.parse_args()
+def _experiment_out_dir(root: Path, stem: str, exp: Experiment, is_list: bool) -> Path:
+    return root / stem / exp.name if is_list else root / stem
 
-    exp_path = Path(args.experiment)
-    exp, is_list = load_experiment(exp_path, args.index)
-    stem = exp_path.stem
-    if is_list:
-        name = f"{stem}/{exp.name}"
-        out_dir = Path("outputs") / stem / exp.name
-    else:
-        name = stem
-        out_dir = Path("outputs") / stem
+
+# --- metrics printing ---------------------------------------------------------
+
+
+def _hashable(v: Any) -> Any:
+    """Coerce a value to something hashable (for set-based diffing)."""
+    if callable(v):
+        return getattr(v, "__name__", repr(v))
+    if isinstance(v, (list, tuple)):
+        return tuple(_hashable(x) for x in v)
+    if isinstance(v, dict):
+        return tuple(sorted((k, _hashable(x)) for k, x in v.items()))
+    try:
+        hash(v)
+        return v
+    except TypeError:
+        return repr(v)
+
+
+def _flatten_config(exp: Experiment) -> dict[str, Any]:
+    """Dict of comparable config knobs for one experiment.
+
+    Includes the model class + its dataclass fields, domain, seed, and per-phase
+    fields (excluding the opaque optimizer). Callables are represented by name.
+    """
+    d: dict[str, Any] = {"model.__class__": type(exp.model).__name__}
+    for f in dataclasses.fields(exp.model):
+        if f.name in ("parent", "name"):
+            continue
+        try:
+            v = getattr(exp.model, f.name)
+        except AttributeError:
+            continue
+        d[f"model.{f.name}"] = _hashable(v)
+    for k, v in exp.domain.items():
+        d[f"domain.{k}"] = _hashable(v)
+    d["seed"] = exp.seed
+    d["n_phases"] = len(exp.phases)
+    for i, p in enumerate(exp.phases):
+        for f in dataclasses.fields(p):
+            if f.name == "optimizer":
+                continue
+            d[f"p{i}.{f.name}"] = _hashable(getattr(p, f.name))
+    return d
+
+
+def _varying_keys(exps: list[Experiment]) -> list[str]:
+    """Config keys whose values differ across at least two experiments."""
+    flats = [_flatten_config(e) for e in exps]
+    keys = sorted(set().union(*(f.keys() for f in flats)))
+    varying: list[str] = []
+    for k in keys:
+        vals = {f.get(k, "<missing>") for f in flats}
+        if len(vals) > 1:
+            varying.append(k)
+    return varying
+
+
+def _short_key(key: str) -> str:
+    """Drop the ``model.`` prefix for cleaner column headers."""
+    return key[6:] if key.startswith("model.") else key
+
+
+def _fmt_cell(v: Any) -> str:
+    if v is None:
+        return "nr"
+    if isinstance(v, float):
+        return f"{v:.4g}"
+    if isinstance(v, tuple):
+        return "(" + ",".join(_fmt_cell(x) for x in v) + ")"
+    return str(v)
+
+
+def _load_metrics(path: Path) -> dict[str, Any] | None:
+    if not path.is_file():
+        return None
+    with path.open() as f:
+        return json.load(f)
+
+
+def _print_table(rows: list[list[str]], header: list[str]) -> None:
+    widths = [len(h) for h in header]
+    for row in rows:
+        for i, cell in enumerate(row):
+            widths[i] = max(widths[i], len(cell))
+    fmt = "  ".join(f"{{:<{w}}}" for w in widths)
+    print(fmt.format(*header))
+    print("  ".join("-" * w for w in widths))
+    for row in rows:
+        print(fmt.format(*row))
+
+
+def print_metrics(exps: list[Experiment], is_list: bool, stem: str,
+                  out_root: Path) -> None:
+    """Print metrics for the experiment(s). Missing runs show 'nr'."""
+    loaded = [
+        _load_metrics(_experiment_out_dir(out_root, stem, e, is_list) / "metrics.json")
+        for e in exps
+    ]
+
+    if not is_list:
+        m = loaded[0]
+        if m is None:
+            print(f"{stem}: nr (no metrics.json in {out_root / stem})")
+            return
+        width = max(len(k) for k in m) if m else 0
+        for k in sorted(m):
+            print(f"{k:<{width}}  {_fmt_cell(m[k])}")
+        return
+
+    varying_full = _varying_keys(exps)
+    varying = [_short_key(k) for k in varying_full]
+
+    # Metric columns: union across loaded runs, sorted; drop all-false booleans
+    metric_keys: set[str] = set()
+    for m in loaded:
+        if m is not None:
+            metric_keys.update(m.keys())
+    for k in list(metric_keys):
+        vals = {m[k] for m in loaded if m is not None and k in m}
+        if vals and vals.issubset({"false"}):
+            metric_keys.discard(k)
+    metric_cols = sorted(metric_keys)
+    # Pull training_time_s to the end if present
+    if "training_time_s" in metric_cols:
+        metric_cols.remove("training_time_s")
+        metric_cols.append("training_time_s")
+
+    header = ["name"] + varying + metric_cols
+    rows: list[list[str]] = []
+    for e, m in zip(exps, loaded):
+        cfg = _flatten_config(e)
+        row = [e.name] + [_fmt_cell(cfg.get(k)) for k in varying_full]
+        if m is None:
+            row += ["nr"] * len(metric_cols)
+        else:
+            row += [_fmt_cell(m.get(k)) for k in metric_cols]
+        rows.append(row)
+
+    _print_table(rows, header)
+
+
+def _train_and_eval(exp: Experiment, exp_path: Path, out_dir: Path, name: str,
+                    *, retrain: bool, skip_plots: bool,
+                    plot_corner_trace: bool) -> None:
+    """Train or load a single experiment, save artifacts, and (optionally) plot."""
     ckpt_path = out_dir / "checkpoint.msgpack"
     loss_path = out_dir / "loss.npy"
     metrics_path = out_dir / "metrics.json"
     plots_dir = out_dir / "plots"
 
     training_time_s = None
-    if ckpt_path.is_file() and not args.retrain:
+    if ckpt_path.is_file() and not retrain:
         print(f"Loading checkpoint from {ckpt_path}")
         state = load_checkpoint(ckpt_path, build_template_state(exp))
         loss_trace = load_loss_trace(loss_path)
@@ -133,7 +276,7 @@ def main():
             plot_corner_error(
                 s, frames_dir / f"corner_error_{step:07d}.png", **exp.domain,
             )
-        cb = corner_cb if args.plot_corner_trace else None
+        cb = corner_cb if plot_corner_trace else None
         t0 = time.monotonic()
         state, loss_trace, _ = run_experiment(exp, corner_callback=cb)
         training_time_s = round(time.monotonic() - t0, 1)
@@ -151,7 +294,7 @@ def main():
         json.dump(metrics, f, indent=2, sort_keys=True)
     print(json.dumps(metrics, indent=2, sort_keys=True))
 
-    if args.skip_plots:
+    if skip_plots:
         return
     if loss_trace is not None:
         plot_loss(loss_trace, plots_dir / "loss.png", title=f"Training loss — {name}")
@@ -163,6 +306,63 @@ def main():
     plot_pstar_hist2d(state, plots_dir / "pstar_hist2d.png", **exp.domain)
     plot_corner_error(state, plots_dir / "corner_error.png", **exp.domain)
     plot_corner_pstar(plots_dir / "corner_pstar.png", **exp.domain)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("experiment", help="path to Python experiment file")
+    ap.add_argument("--index", type=int, default=None,
+                    help="select experiments[N] when the file defines a list")
+    ap.add_argument("--retrain", action="store_true", help="ignore checkpoint")
+    ap.add_argument("--skip-plots", action="store_true")
+    ap.add_argument("--plot-corner-trace", action="store_true")
+    ap.add_argument("--print-metrics", action="store_true",
+                    help="print metrics (aggregated over a list) and exit; "
+                         "with --retrain, train the selected experiment first")
+    ap.add_argument("--count", action="store_true",
+                    help="print the number of experiments in the file and exit "
+                         "(1 for single-experiment files)")
+    args = ap.parse_args()
+
+    exp_path = Path(args.experiment)
+    exps, is_list = load_experiments(exp_path)
+    stem = exp_path.stem
+    out_root = Path("outputs")
+
+    if args.count:
+        print(len(exps))
+        return
+
+    # --print-metrics short-circuits: no plotting, optional retraining of one
+    # selected experiment, then print metrics and exit.
+    if args.print_metrics:
+        if args.retrain:
+            idx = select_index(exps, is_list, args.index, exp_path)
+            exp = exps[idx]
+            out_dir = _experiment_out_dir(out_root, stem, exp, is_list)
+            name = f"{stem}/{exp.name}" if is_list else stem
+            _train_and_eval(
+                exp, exp_path, out_dir, name,
+                retrain=True, skip_plots=True,
+                plot_corner_trace=args.plot_corner_trace,
+            )
+        elif args.index is not None:
+            raise ValueError(
+                "--index is only meaningful with --retrain under --print-metrics; "
+                "drop --index to see the aggregated table for all runs"
+            )
+        print_metrics(exps, is_list, stem, out_root)
+        return
+
+    idx = select_index(exps, is_list, args.index, exp_path)
+    exp = exps[idx]
+    out_dir = _experiment_out_dir(out_root, stem, exp, is_list)
+    name = f"{stem}/{exp.name}" if is_list else stem
+    _train_and_eval(
+        exp, exp_path, out_dir, name,
+        retrain=args.retrain, skip_plots=args.skip_plots,
+        plot_corner_trace=args.plot_corner_trace,
+    )
 
 
 if __name__ == "__main__":
