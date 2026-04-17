@@ -77,6 +77,7 @@ class Experiment:
     phases: list[Phase]
     seed: int = 42
     corner_every: int = 100
+    name: Optional[str] = None
 
 
 # --- phase factories ----------------------------------------------------------

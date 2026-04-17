@@ -28,35 +28,95 @@ from riemann_pinn.train import (
 )
 
 
-def load_experiment(path: Path) -> Experiment:
+def load_experiment(path: Path, index: int | None) -> tuple[Experiment, bool]:
+    """Load an experiment module.
+
+    The module must define either a single ``experiment = Experiment(...)`` or
+    a list ``experiments = [Experiment(...), ...]``. Returns ``(exp, is_list)``;
+    for list-valued modules, each experiment is required to carry a ``name``
+    and ``index`` selects which one to return.
+    """
     spec = importlib.util.spec_from_file_location("_experiment", path)
     if spec is None or spec.loader is None:
         raise ImportError(f"could not load experiment module from {path}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    if not hasattr(module, "experiment"):
-        raise AttributeError(f"{path} must define `experiment = Experiment(...)`")
-    exp = module.experiment
-    if not isinstance(exp, Experiment):
-        raise TypeError(
-            f"{path}: `experiment` must be an Experiment instance, got {type(exp).__name__}"
+
+    has_single = hasattr(module, "experiment")
+    has_list = hasattr(module, "experiments")
+    if has_single and has_list:
+        raise AttributeError(
+            f"{path}: define exactly one of `experiment` or `experiments`, not both"
         )
-    return exp
+    if not has_single and not has_list:
+        raise AttributeError(
+            f"{path}: must define `experiment = Experiment(...)` or "
+            f"`experiments = [Experiment(...), ...]`"
+        )
+
+    if has_single:
+        if index is not None:
+            raise ValueError(
+                f"{path}: defines a single `experiment`; --index is not allowed"
+            )
+        exp = module.experiment
+        if not isinstance(exp, Experiment):
+            raise TypeError(
+                f"{path}: `experiment` must be an Experiment instance, "
+                f"got {type(exp).__name__}"
+            )
+        return exp, False
+
+    exps = module.experiments
+    if not isinstance(exps, (list, tuple)) or not exps:
+        raise TypeError(
+            f"{path}: `experiments` must be a non-empty list of Experiment instances"
+        )
+    for i, e in enumerate(exps):
+        if not isinstance(e, Experiment):
+            raise TypeError(
+                f"{path}: experiments[{i}] must be an Experiment instance, "
+                f"got {type(e).__name__}"
+            )
+        if not e.name:
+            raise ValueError(
+                f"{path}: experiments[{i}] must set `name=...` when using a list"
+            )
+    names = [e.name for e in exps]
+    if len(set(names)) != len(names):
+        raise ValueError(f"{path}: duplicate names in `experiments`: {names}")
+
+    if index is None:
+        raise ValueError(
+            f"{path}: defines `experiments` (list of {len(exps)}); --index is required. "
+            f"Available: {list(enumerate(names))}"
+        )
+    if not 0 <= index < len(exps):
+        raise IndexError(
+            f"{path}: --index {index} out of range [0, {len(exps)})"
+        )
+    return exps[index], True
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("experiment", help="path to Python experiment file")
+    ap.add_argument("--index", type=int, default=None,
+                    help="select experiments[N] when the file defines a list")
     ap.add_argument("--retrain", action="store_true", help="ignore checkpoint")
     ap.add_argument("--skip-plots", action="store_true")
     ap.add_argument("--plot-corner-trace", action="store_true")
     args = ap.parse_args()
 
     exp_path = Path(args.experiment)
-    exp = load_experiment(exp_path)
-    name = exp_path.stem
-
-    out_dir = Path("outputs") / name
+    exp, is_list = load_experiment(exp_path, args.index)
+    stem = exp_path.stem
+    if is_list:
+        name = f"{stem}/{exp.name}"
+        out_dir = Path("outputs") / stem / exp.name
+    else:
+        name = stem
+        out_dir = Path("outputs") / stem
     ckpt_path = out_dir / "checkpoint.msgpack"
     loss_path = out_dir / "loss.npy"
     metrics_path = out_dir / "metrics.json"
