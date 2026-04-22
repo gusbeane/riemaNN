@@ -1,8 +1,8 @@
-"""MLP for predicting p* from a log-space gas state.
+"""Neural network models that predict the star-region pressure p*.
 
-The network is parameterized internally in log-space (it emits log10 p*),
-but `__call__` returns the physical p* so callers don't need to undo the
-log transform.
+A single `PressureMLP` with a `normalize` flag covers the three variants we
+actually use (plain, arithmetic-mean-normalized, geometric-mean-normalized).
+Output is physical p* so callers don't need to undo the log transform.
 """
 
 from typing import Callable
@@ -12,181 +12,75 @@ import jax.numpy as jnp
 
 from . import physics
 
+
 class _MLP(nn.Module):
-    """Small reusable MLP block."""
-    width: int = 64
-    depth: int = 2
-    output_dim: int = 5
+    """Shared MLP block."""
+    width: int
+    depth: int
+    output_dim: int = 1
     activation: Callable = nn.silu
 
     @nn.compact
     def __call__(self, x):
         for _ in range(self.depth):
-            x = nn.Dense(self.width)(x)
-            x = self.activation(x)
+            x = self.activation(nn.Dense(self.width)(x))
         return nn.Dense(self.output_dim)(x)
 
-class StarPressureMLP(nn.Module):
-    """MLP that maps a log-space gas state (B, 5) to a scalar p*."""
 
-    width: int = 64
-    depth: int = 2
-    activation: Callable = nn.silu
-    output_dim: int = 1
+class PressureMLP(nn.Module):
+    """Maps log-space gas state (B, 5) -> scalar p*.
 
-    @nn.compact
-    def __call__(self, x):
-        model = _MLP(width=self.width, depth=self.depth, activation=self.activation,
-                 output_dim=self.output_dim)
-
-        x = model(x)
-
-        if self.output_dim == 1:
-            x = x.squeeze(-1)
-
-        return 10.0 ** x
-
-
-class StarPressureMLPNormalized(nn.Module):
-    """MLP that normalizes inputs/targets by state-dependent reference scales.
-
-    Input x is (B, 5) in mixed form:
-      (log10 rhoL, log10 pL, log10 rhoR, log10 pR, uRL).
-
-    The network consumes:
-      (log10(rhoL/rho_ref), log10(pL/p_ref),
-       log10(rhoR/rho_ref), log10(pR/p_ref), uRL/u_ref),
-    predicts log10(p*/p_ref), and returns physical p*.
+    normalize:
+      "none"   — raw log inputs; network emits log10 p* directly.
+      "arith"  — divide by arithmetic means: rho_ref = 0.5*(rhoL+rhoR),
+                 p_ref = 0.5*(pL+pR), u_ref = c_s(p_ref, rho_ref).
+      "geom"   — geometric means in log space (antisymmetric under L<->R).
     """
-
     width: int = 64
     depth: int = 2
+    normalize: str = "none"
     activation: Callable = nn.silu
 
     @nn.compact
     def __call__(self, x):
-        model = _MLP(
-            width=self.width,
-            depth=self.depth,
-            activation=self.activation,
-            output_dim=1,
-        )
+        model = _MLP(width=self.width, depth=self.depth,
+                     activation=self.activation, output_dim=1)
 
-        gas_phys = physics.gas_log_to_phys(x)
-        rhoL, pL, rhoR, pR, uRL = jnp.split(gas_phys, [1, 2, 3, 4], axis=-1)
+        if self.normalize == "none":
+            return 10.0 ** model(x).squeeze(-1)
 
-        rho_ref = 0.5 * (rhoL + rhoR)
-        p_ref = 0.5 * (pL + pR)
-        u_ref = physics.sound_speed(p_ref, rho_ref)
+        if self.normalize == "arith":
+            gas_phys = physics.gas_log_to_phys(x)
+            rhoL, pL, rhoR, pR, uRL = jnp.split(gas_phys, [1, 2, 3, 4], axis=-1)
+            rho_ref = 0.5 * (rhoL + rhoR)
+            p_ref = 0.5 * (pL + pR)
+            u_ref = physics.sound_speed(p_ref, rho_ref)
+            gas_phys_norm = jnp.concatenate(
+                [rhoL / rho_ref, pL / p_ref, rhoR / rho_ref, pR / p_ref, uRL / u_ref],
+                axis=-1,
+            )
+            x_norm = physics.gas_phys_to_log(gas_phys_norm)
+            log_pstar_over_pref = model(x_norm).squeeze(-1)
+            return p_ref.squeeze(-1) * (10.0 ** log_pstar_over_pref)
 
-        gas_phys_norm = jnp.concatenate(
-            [rhoL / rho_ref, pL / p_ref, rhoR / rho_ref, pR / p_ref, uRL / u_ref],
-            axis=-1,
-        )
-        x_norm = physics.gas_phys_to_log(gas_phys_norm)
+        if self.normalize == "geom":
+            log_rhoL, log_pL, log_rhoR, log_pR, uRL = jnp.split(x, 5, axis=-1)
+            log_rho_ref = 0.5 * (log_rhoL + log_rhoR)
+            log_p_ref = 0.5 * (log_pL + log_pR)
+            p_ref = 10.0 ** log_p_ref
+            rho_ref = 10.0 ** log_rho_ref
+            u_ref = physics.sound_speed(p_ref, rho_ref)
+            x_norm = jnp.concatenate(
+                [
+                    log_rhoL - log_rho_ref,
+                    log_pL - log_p_ref,
+                    log_rhoR - log_rho_ref,
+                    log_pR - log_p_ref,
+                    uRL / u_ref,
+                ],
+                axis=-1,
+            )
+            log_pstar_over_pref = model(x_norm).squeeze(-1)
+            return p_ref.squeeze(-1) * (10.0 ** log_pstar_over_pref)
 
-        log_pstar_over_pref = model(x_norm).squeeze(-1)
-        return p_ref.squeeze(-1) * (10.0 ** log_pstar_over_pref)
-
-
-class StarPressureMLPNormalizedGeom(nn.Module):
-    """Like StarPressureMLPNormalized but uses the geometric mean for refs.
-
-    rho_ref = sqrt(rhoL * rhoR), p_ref = sqrt(pL * pR), u_ref = c_s(p_ref, rho_ref).
-    Since inputs arrive in log space, the log-ref is just the arithmetic mean of
-    (log rhoL, log rhoR) (and similarly for p), which avoids a round-trip through
-    physical space and also produces inputs that are antisymmetric under L<->R.
-    """
-
-    width: int = 64
-    depth: int = 2
-    activation: Callable = nn.silu
-
-    @nn.compact
-    def __call__(self, x):
-        model = _MLP(
-            width=self.width,
-            depth=self.depth,
-            activation=self.activation,
-            output_dim=1,
-        )
-
-        log_rhoL, log_pL, log_rhoR, log_pR, uRL = jnp.split(x, 5, axis=-1)
-        log_rho_ref = 0.5 * (log_rhoL + log_rhoR)
-        log_p_ref = 0.5 * (log_pL + log_pR)
-        p_ref = 10.0 ** log_p_ref
-        rho_ref = 10.0 ** log_rho_ref
-        u_ref = physics.sound_speed(p_ref, rho_ref)
-
-        x_norm = jnp.concatenate(
-            [
-                log_rhoL - log_rho_ref,
-                log_pL - log_p_ref,
-                log_rhoR - log_rho_ref,
-                log_pR - log_p_ref,
-                uRL / u_ref,
-            ],
-            axis=-1,
-        )
-
-        log_pstar_over_pref = model(x_norm).squeeze(-1)
-        return p_ref.squeeze(-1) * (10.0 ** log_pstar_over_pref)
-
-
-class PstarLogCorrectionMLP(nn.Module):
-    """Correction sub-net that emits a signed log10 correction delta.
-
-    Takes the log-space gas state and the primary network's log10 p* prediction
-    as features; output delta is added (in log-space) to the primary's log10 p*,
-    i.e. p*_final = p*_primary * 10^delta.
-    """
-
-    width: int = 64
-    depth: int = 2
-    activation: Callable = nn.silu
-
-    @nn.compact
-    def __call__(self, x, log_p_primary):
-        features = jnp.concatenate([x, log_p_primary[:, None]], axis=-1)
-        return _MLP(
-            width=self.width, depth=self.depth, output_dim=1,
-            activation=self.activation,
-        )(features).squeeze(-1)
-
-
-class StarPressureDS(nn.Module):
-    """Deep Set that predicts p* from a log-space gas state.
-
-    Shared encoder phi maps each (log rho, log p) gas state to a latent
-    vector. The sum z = phi(xL) + phi(xR) is permutation-invariant.
-    Decoder rho maps (z, uRL^2) to log10 p*; the module returns the
-    exponentiated p*.
-    """
-
-    phi_width: int = 64
-    phi_depth: int = 2
-    phi_output_dim: int = 5
-    activation: Callable = nn.silu
-    rho_width: int = 64
-    rho_depth: int = 2
-
-    @nn.compact
-    def __call__(self, x):
-        # x: (B, 5) = (log rhoL, log pL, log rhoR, log pR, uRL)
-        xL = x[:, :2]                          # (B, 2)
-        xR = x[:, 2:4]                         # (B, 2)
-        uRL_sq = x[:, 4:5] ** 2                # (B, 1) — even function for symmetry
-
-        # Shared encoder: same instance called twice -> shared weights
-        phi = _MLP(width=self.phi_width, depth=self.phi_depth,
-                   output_dim=self.phi_output_dim, activation=self.activation,
-                   name="phi")
-        z = phi(xL) + phi(xR)                  # (B, phi_output_dim)
-        z = jnp.concatenate([z, uRL_sq], axis=-1)  # (B, phi_output_dim + 1)
-
-        # Decoder
-        rho = _MLP(width=self.rho_width, depth=self.rho_depth,
-                   output_dim=1, activation=self.activation,
-                   name="rho")
-        return 10.0 ** rho(z).squeeze(-1)       # (B,)
-
+        raise ValueError(f"unknown normalize mode: {self.normalize!r}")
