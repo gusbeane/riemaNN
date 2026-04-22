@@ -130,4 +130,4 @@ fi
 echo
 echo "All $N runs complete."
 echo
-venv/bin/python run.py "$EXPERIMENT" --print-metrics
+venv/bin/python report.py "$EXPERIMENT"
