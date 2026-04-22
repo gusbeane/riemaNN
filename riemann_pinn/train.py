@@ -197,6 +197,13 @@ def create_train_state(rng, model, optimizer, batch_size_hint=256):
     )
 
 
+def create_train_state_from_apply(apply_fn, params, optimizer):
+    """Build a TrainState from a pre-built apply_fn and initialized params."""
+    return flax_train_state.TrainState.create(
+        apply_fn=apply_fn, params=params, tx=optimizer,
+    )
+
+
 def make_train_step(loss_fn: Callable) -> Callable:
     @jax.jit
     def train_step(state, gas_states_log):

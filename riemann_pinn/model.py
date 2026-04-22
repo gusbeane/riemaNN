@@ -133,6 +133,27 @@ class StarPressureMLPNormalizedGeom(nn.Module):
         return p_ref.squeeze(-1) * (10.0 ** log_pstar_over_pref)
 
 
+class PstarLogCorrectionMLP(nn.Module):
+    """Correction sub-net that emits a signed log10 correction delta.
+
+    Takes the log-space gas state and the primary network's log10 p* prediction
+    as features; output delta is added (in log-space) to the primary's log10 p*,
+    i.e. p*_final = p*_primary * 10^delta.
+    """
+
+    width: int = 64
+    depth: int = 2
+    activation: Callable = nn.silu
+
+    @nn.compact
+    def __call__(self, x, log_p_primary):
+        features = jnp.concatenate([x, log_p_primary[:, None]], axis=-1)
+        return _MLP(
+            width=self.width, depth=self.depth, output_dim=1,
+            activation=self.activation,
+        )(features).squeeze(-1)
+
+
 class StarPressureDS(nn.Module):
     """Deep Set that predicts p* from a log-space gas state.
 
