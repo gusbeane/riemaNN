@@ -1,23 +1,21 @@
 """Effect of widening the training domain beyond the evaluation domain.
 
-Base config is the w64_d2_lr0.008 cell of adamw_normmlp_wdgrid.py with the
-geometric-mean normalization (StarPressureMLPNormalizedGeom). Only the
-sampling domain during training changes:
+Narrow: train_domain == domain (training = evaluation region).
+Wide:   train_domain extended by +/- 0.2 in log rho/log p and +/- 0.1 in
+        uRL, so some training samples fall outside the test region.
 
-  narrow:  train_domain == domain  (training = evaluation region)
-  wide:    train_domain extended by +/- 0.2 in log rho, log p
-                                   and +/- 0.1 in uRL, so some training
-                                   samples fall outside the test region.
-
-The wide run scales its batch size by the 5-D volume ratio so sample
-density per batch is held constant. The evaluation/plot domain is the
-same in both runs.
+The wide run scales its batch size by the 5-D volume ratio so per-batch
+sample density is held constant. Evaluation/plot domain is the same in
+both runs.
 """
 
 from math import prod
 
-from riemann_pinn.experiment import Experiment, adam_cosine
-from riemann_pinn.model import StarPressureMLPNormalizedGeom
+import optax
+
+from riemann_pinn.model import PressureMLP
+from riemann_pinn.train import Experiment, Phase, residual_loss
+
 
 _BASE_BATCH_SIZE = 2048
 
@@ -34,7 +32,6 @@ _WIDE_TRAIN_DOMAIN = dict(
 
 
 def _volume(dom: dict) -> float:
-    # 5-D box volume: log rho appears twice (L, R), same for log p.
     widths = {k: v[1] - v[0] for k, v in dom.items()}
     return prod([
         widths["log_rho_range"], widths["log_p_range"],
@@ -50,9 +47,19 @@ def _scaled_batch(train_domain: dict) -> int:
 
 def _phases(batch_size: int):
     return [
-        adam_cosine(
-            n_epochs=40_000, lr=8e-3, alpha=0.0, batch_size=batch_size,
-            loss="fstar", log_every=200,
+        Phase(
+            tx=optax.chain(
+                optax.clip_by_global_norm(1.0),
+                optax.adamw(
+                    optax.cosine_decay_schedule(8e-3, 40_000, alpha=0.0),
+                    weight_decay=1e-4,
+                ),
+            ),
+            n_epochs=40_000,
+            loss=residual_loss,
+            batch_size=batch_size,
+            log_every=200,
+            name="adam_cosine",
         ),
     ]
 
@@ -60,11 +67,11 @@ def _phases(batch_size: int):
 def _make(name: str, train_domain: dict | None) -> Experiment:
     bs = _BASE_BATCH_SIZE if train_domain is None else _scaled_batch(train_domain)
     return Experiment(
-        model=StarPressureMLPNormalizedGeom(width=64, depth=2),
+        name=name,
+        model=PressureMLP(width=64, depth=2, normalize="geom"),
         domain=_DOMAIN,
         train_domain=train_domain,
         seed=42,
-        name=name,
         phases=_phases(bs),
     )
 

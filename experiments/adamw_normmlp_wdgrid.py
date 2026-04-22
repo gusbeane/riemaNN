@@ -1,14 +1,17 @@
-"""Width/depth grid over the normalized MLP baseline (adamw_normmlp).
+"""Width/depth/lr grid over the normalized MLP baseline (adamw_normmlp).
 
-Same optimizer, loss, domain, seed, and phase budget as `adamw_normmlp.py`; only
-the `StarPressureMLPNormalized(width, depth)` varies. Select one with
-``--index N``; outputs land in ``outputs/adamw_normmlp_wdgrid/<name>/``.
+Same optimizer, loss, domain, seed, and phase budget as adamw_normmlp.py;
+only width/depth/lr vary. Select one with --index N; outputs land in
+outputs/adamw_normmlp_wdgrid/<name>/.
 """
 
 from itertools import product
 
-from riemann_pinn.experiment import Experiment, adam_cosine
-from riemann_pinn.model import StarPressureMLPNormalized
+import optax
+
+from riemann_pinn.model import PressureMLP
+from riemann_pinn.train import Experiment, Phase, residual_loss
+
 
 _DOMAIN = dict(
     log_rho_range=(0.0, 2.0),
@@ -18,19 +21,29 @@ _DOMAIN = dict(
 
 _WIDTHS = [64, 128, 256]
 _DEPTHS = [2, 3, 4]
-_LRS = [2e-3, 4e-3, 8e-3]
+_LRS    = [2e-3, 4e-3, 8e-3]
 
 
 def _make(width: int, depth: int, lr: float) -> Experiment:
     return Experiment(
-        model=StarPressureMLPNormalized(width=width, depth=depth),
+        name=f"w{width}_d{depth}_lr{lr}",
+        model=PressureMLP(width=width, depth=depth, normalize="arith"),
         domain=_DOMAIN,
         seed=42,
-        name=f"w{width}_d{depth}_lr{lr}",
         phases=[
-            adam_cosine(
-                n_epochs=10_000, lr=lr, alpha=0.0, batch_size=2048,
-                loss="fstar", log_every=200,
+            Phase(
+                tx=optax.chain(
+                    optax.clip_by_global_norm(1.0),
+                    optax.adamw(
+                        optax.cosine_decay_schedule(lr, 10_000, alpha=0.0),
+                        weight_decay=1e-4,
+                    ),
+                ),
+                n_epochs=10_000,
+                loss=residual_loss,
+                batch_size=2048,
+                log_every=200,
+                name="adam_cosine",
             ),
         ],
     )

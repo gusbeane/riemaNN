@@ -1,20 +1,16 @@
 """Arithmetic vs geometric mean for the normalized-MLP reference scales.
 
-Base config is the w64_d2_lr0.008 cell of adamw_normmlp_wdgrid.py. Only the
-reference-scale definition changes:
-
-  arithmetic:  rho_ref = 0.5 * (rhoL + rhoR),   p_ref = 0.5 * (pL + pR)
-  geometric:   rho_ref = sqrt(rhoL * rhoR),      p_ref = sqrt(pL * pR)
-
-The geometric variant is the arithmetic mean in log space and is antisymmetric
-under L<->R, which may make the learning problem easier.
+Base config is w64_d2_lr0.008 of adamw_normmlp_wdgrid.py; only the
+normalize= mode changes ("arith" vs "geom"). Geometric is the arithmetic
+mean in log space and is antisymmetric under L<->R, which may make the
+learning problem easier.
 """
 
-from riemann_pinn.experiment import Experiment, adam_cosine
-from riemann_pinn.model import (
-    StarPressureMLPNormalized,
-    StarPressureMLPNormalizedGeom,
-)
+import optax
+
+from riemann_pinn.model import PressureMLP
+from riemann_pinn.train import Experiment, Phase, residual_loss
+
 
 _DOMAIN = dict(
     log_rho_range=(0.0, 2.0),
@@ -25,20 +21,32 @@ _DOMAIN = dict(
 
 def _phases():
     return [
-        adam_cosine(
-            n_epochs=10_000, lr=8e-3, alpha=0.0, batch_size=2048,
-            loss="fstar", log_every=200,
+        Phase(
+            tx=optax.chain(
+                optax.clip_by_global_norm(1.0),
+                optax.adamw(
+                    optax.cosine_decay_schedule(8e-3, 10_000, alpha=0.0),
+                    weight_decay=1e-4,
+                ),
+            ),
+            n_epochs=10_000,
+            loss=residual_loss,
+            batch_size=2048,
+            log_every=200,
+            name="adam_cosine",
         ),
     ]
 
 
 experiments = [
     Experiment(
-        model=StarPressureMLPNormalized(width=64, depth=2),
-        domain=_DOMAIN, seed=42, name="arithmetic", phases=_phases(),
+        name="arithmetic",
+        model=PressureMLP(width=64, depth=2, normalize="arith"),
+        domain=_DOMAIN, seed=42, phases=_phases(),
     ),
     Experiment(
-        model=StarPressureMLPNormalizedGeom(width=64, depth=2),
-        domain=_DOMAIN, seed=42, name="geometric", phases=_phases(),
+        name="geometric",
+        model=PressureMLP(width=64, depth=2, normalize="geom"),
+        domain=_DOMAIN, seed=42, phases=_phases(),
     ),
 ]
