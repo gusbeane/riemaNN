@@ -28,7 +28,7 @@ if [[ "$MAX_PARALLEL" -gt "$N" ]]; then
   MAX_PARALLEL=$N
 fi
 
-LOG_DIR=$(mktemp -d -t rungrid.XXXXXX)
+LOG_DIR=$(mktemp -d "${TMPDIR:-/tmp}/rungrid.XXXXXX")
 STAMP_DIR="$LOG_DIR/done"
 mkdir -p "$STAMP_DIR"
 
