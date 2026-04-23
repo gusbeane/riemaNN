@@ -84,3 +84,33 @@ class PressureMLP(nn.Module):
             return p_ref.squeeze(-1) * (10.0 ** log_pstar_over_pref)
 
         raise ValueError(f"unknown normalize mode: {self.normalize!r}")
+
+
+class CompactDimensionPressureMLP(nn.Module):
+    """Maps compact dimension (B, 3) -> scalar p* / p_ref."""
+    width: int = 64
+    depth: int = 2
+    activation: Callable = nn.silu
+
+    @nn.compact
+    def __call__(self, x):
+        model = _MLP(width=self.width, depth=self.depth,
+                     activation=self.activation, output_dim=1)
+
+        gas_phys = physics.gas_log_to_phys(x)
+        rhoL, pL, rhoR, pR, uRL = jnp.split(gas_phys, [1, 2, 3, 4], axis=-1)
+
+        pref = 0.5 * (pL + pR)
+        rho_ref = 0.5 * (rhoL + rhoR)
+        u_ref = physics.sound_speed(pref, rho_ref)
+        delta_rho = (rhoL - rhoR) / (rhoL + rhoR)
+        delta_p = (pL - pR) / (pL + pR)
+        delta_u = uRL / u_ref
+
+        delta_x = jnp.concatenate(
+            [delta_rho, delta_p, delta_u],
+            axis=-1,
+        )
+        pstar = (pref*model(delta_x)).squeeze(-1)
+        return pstar
+
