@@ -149,8 +149,16 @@ anywhere.
   2. `sign(f)·log₁₀|f(p*_NN)|` heatmap over the same grid.
   3. Histogram of `log₁₀(p*_NN / p*_true)`, with an overlaid second
      histogram comparing `p*(drho, dp, du)` against
-     `p*(−drho, −dp, −du)`. The latter is the L↔R-swapped state —
-     still a valid sanity check in the new representation.
+     `p*(−drho, −dp, +du)` — the physical L↔R symmetry of the 1D
+     Riemann problem (spatial reflection: swap L/R labels **and**
+     negate velocities). Because `uRL = uR − uL` is invariant under
+     this reflection (both velocities flip sign and the labels
+     swap), `du = uRL / ducrit` is also invariant; only `drho` and
+     `dp` flip. The true `p*` is unchanged under this swap, so the
+     overlay histogram should peak sharply at zero for a well-trained
+     network. Note: the old 5D pipeline's slice plot used an
+     incorrect swap that negated `uRL` as well — this was a bug
+     that did not correspond to any physical invariance.
 - `plot_pstar_hist2d` — unchanged idea (true vs NN), 3D sampling.
 - `_corner_panels` — rewritten for 3 vars, returns 3 panels:
   `(drho, dp), (drho, du), (dp, du)`.

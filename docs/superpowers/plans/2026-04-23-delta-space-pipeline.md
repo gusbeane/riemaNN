@@ -251,10 +251,11 @@ gs2 = jnp.array([0.3, -0.2, 0.1])
 p2, f2 = physics.find_pstar(gs2)
 assert float(p2) > 0 and abs(float(f2)) < 1e-9, (p2, f2)
 
-# L<->R symmetry: swapping sides sends (drho, dp, du) -> (-drho, -dp, -du)
-# and leaves p* (a physical pressure) invariant.
+# L<->R symmetry: spatial reflection swaps labels AND negates
+# velocities, so uRL = uR - uL is invariant, hence du is invariant.
+# Only drho and dp flip sign. p* is invariant.
 gs3 = jnp.array([0.5, -0.3, -0.4])
-gs3_swap = -gs3
+gs3_swap = jnp.array([-0.5, 0.3, -0.4])  # (-drho, -dp, +du)
 p3, _ = physics.find_pstar(gs3)
 p3s, _ = physics.find_pstar(gs3_swap)
 assert abs(float(p3) - float(p3s)) < 1e-8, (p3, p3s)
@@ -859,10 +860,13 @@ def plot_slice(
             label=r"$\log_{10}(p^*_{\mathrm{NN}}/p^*_{\mathrm{true}})$")
     ax.set(xlim=err_range, yscale="log")
 
-    # L<->R symmetry sanity check: the Riemann problem is invariant under
-    # (drho, dp, du) -> (-drho, -dp, -du). Plot the NN's deviation from
-    # that invariance as a second histogram.
-    gas_states_swap = -gas_states
+    # L<->R symmetry sanity check: the physical L<->R swap (spatial
+    # reflection) sends (drho, dp, du) -> (-drho, -dp, +du) -- du is
+    # invariant because swapping labels and negating velocities leaves
+    # uRL = uR - uL unchanged. True p* is invariant, so the NN's
+    # deviation from this invariance is a training-quality metric.
+    swap_sign = jnp.array([-1.0, -1.0, 1.0])
+    gas_states_swap = gas_states * swap_sign
     pstar_nn_swap = state.apply_fn({"params": state.params}, gas_states_swap)
     log_ratio_sym = np.asarray(jnp.log10(pstar_nn) - jnp.log10(pstar_nn_swap))
     ax.hist(log_ratio_sym, bins=bins, histtype="step", ec="b", density=True,
