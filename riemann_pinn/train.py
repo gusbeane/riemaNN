@@ -1,4 +1,5 @@
-"""Training primitives: samplers, losses, Experiment/Phase runner, checkpoint I/O, eval."""
+"""Training primitives: samplers, losses, Experiment/Phase runner,
+checkpoint I/O, eval. All in 3D delta-space."""
 
 from __future__ import annotations
 
@@ -23,22 +24,20 @@ from .physics import GAS_STATE_DIM
 # --- samplers ----------------------------------------------------------------
 
 
-def uniform_log(
+def uniform(
     rng,
     batch_size: int,
     *,
-    log_rho_range: tuple[float, float] = (0.0, 2.0),
-    log_p_range: tuple[float, float] = (-2.0, 2.0),
-    u_range: tuple[float, float] = (-1.0, 1.0),
+    drho_range: tuple[float, float],
+    dp_range: tuple[float, float],
+    du_range: tuple[float, float],
 ) -> jnp.ndarray:
-    """Uniform i.i.d. samples in (log10 rhoL, log10 pL, log10 rhoR, log10 pR, uRL)."""
-    keys = jr.split(rng, 5)
-    logrhoL = jr.uniform(keys[0], (batch_size,), minval=log_rho_range[0], maxval=log_rho_range[1])
-    logpL   = jr.uniform(keys[1], (batch_size,), minval=log_p_range[0],   maxval=log_p_range[1])
-    logrhoR = jr.uniform(keys[2], (batch_size,), minval=log_rho_range[0], maxval=log_rho_range[1])
-    logpR   = jr.uniform(keys[3], (batch_size,), minval=log_p_range[0],   maxval=log_p_range[1])
-    uRL     = jr.uniform(keys[4], (batch_size,), minval=u_range[0],       maxval=u_range[1])
-    return jnp.stack([logrhoL, logpL, logrhoR, logpR, uRL], axis=-1)
+    """Uniform i.i.d. samples in (drho, dp, du). Returns (B, 3)."""
+    keys = jr.split(rng, 3)
+    drho = jr.uniform(keys[0], (batch_size,), minval=drho_range[0], maxval=drho_range[1])
+    dp   = jr.uniform(keys[1], (batch_size,), minval=dp_range[0],   maxval=dp_range[1])
+    du   = jr.uniform(keys[2], (batch_size,), minval=du_range[0],   maxval=du_range[1])
+    return jnp.stack([drho, dp, du], axis=-1)
 
 
 # R2 quasirandom additive recurrence. Golden ratios for d=1..12.
@@ -54,67 +53,48 @@ def r2_quasirandom(
     rng,
     batch_size: int,
     *,
-    log_rho_range: tuple[float, float],
-    log_p_range: tuple[float, float],
-    u_range: tuple[float, float],
+    drho_range: tuple[float, float],
+    dp_range: tuple[float, float],
+    du_range: tuple[float, float],
 ) -> jnp.ndarray:
-    """R2 quasirandom samples in (log10 rhoL, log10 pL, log10 rhoR, log10 pR, uRL)."""
-    NDIM = 5
+    """R2 quasirandom samples in (drho, dp, du). Returns (B, 3)."""
+    NDIM = 3
     g = _R2_GOLDEN[NDIM - 1]
     powers = jnp.arange(1, NDIM + 1, dtype=jnp.float32)
     a = g ** (-powers)
     x0 = jr.uniform(rng, (NDIM,), minval=0.0, maxval=1.0)
     n = jnp.arange(batch_size, dtype=jnp.float32)[:, None]
     out_unit = jnp.mod(x0[None, :] + n * a[None, :], 1.0)
-    lo = jnp.array(
-        [log_rho_range[0], log_p_range[0], log_rho_range[0], log_p_range[0], u_range[0]],
-        dtype=out_unit.dtype,
-    )
-    hi = jnp.array(
-        [log_rho_range[1], log_p_range[1], log_rho_range[1], log_p_range[1], u_range[1]],
-        dtype=out_unit.dtype,
-    )
+    lo = jnp.array([drho_range[0], dp_range[0], du_range[0]], dtype=out_unit.dtype)
+    hi = jnp.array([drho_range[1], dp_range[1], du_range[1]], dtype=out_unit.dtype)
     return lo + (hi - lo) * out_unit
 
 
 # --- losses ------------------------------------------------------------------
 
 
-def residual_loss(params, apply_fn, gas_states_log):
+def residual_loss(params, apply_fn, gas_states):
     """Mean squared f(p*) residual. Returns (loss, metrics)."""
-    pstar = apply_fn({"params": params}, gas_states_log)
-    gas_states_phys = physics.gas_log_to_phys(gas_states_log)
-    fstar_vals = jax.vmap(physics.fstar)(pstar, gas_states_phys)
+    pstar = apply_fn({"params": params}, gas_states)
+    fstar_vals = jax.vmap(physics.fstar)(pstar, gas_states)
     loss = jnp.mean(fstar_vals ** 2)
     return loss, {"loss/fstar": loss}
 
 
-def residual_loss_normalized(params, apply_fn, gas_states_log):
-    """Mean of (f(p*) / c_ref)^2, where c_ref is the average sound speed."""
-    pstar = apply_fn({"params": params}, gas_states_log)
-    gas_states_phys = physics.gas_log_to_phys(gas_states_log)
-    fstar_vals = jax.vmap(physics.fstar)(pstar, gas_states_phys)
-    cref_vals = jax.vmap(physics.ref_sound_speed)(gas_states_phys)
-    loss = jnp.mean((fstar_vals / cref_vals) ** 2)
-    return loss, {"loss/fstar": loss}
-
-
-def residual_loss_newton(params, apply_fn, gas_states_log):
-    """Mean of (f/f')^2 — a proxy for squared pressure error without calling the exact solver."""
-    pstar = apply_fn({"params": params}, gas_states_log)
-    gas_states_phys = physics.gas_log_to_phys(gas_states_log)
-    fstar_vals = jax.vmap(physics.fstar)(pstar, gas_states_phys)
-    fprime_vals = jax.vmap(physics.dfstar_dp)(pstar, gas_states_phys)
+def residual_loss_newton(params, apply_fn, gas_states):
+    """Mean of (f/f')^2 -- a proxy for squared pressure error."""
+    pstar = apply_fn({"params": params}, gas_states)
+    fstar_vals = jax.vmap(physics.fstar)(pstar, gas_states)
+    fprime_vals = jax.vmap(physics.dfstar_dp)(pstar, gas_states)
     weight = jax.lax.stop_gradient(fprime_vals)
     loss = jnp.mean((fstar_vals / weight) ** 2)
     return loss, {"loss/newton": loss}
 
 
-def supervised_loss(params, apply_fn, gas_states_log):
+def supervised_loss(params, apply_fn, gas_states):
     """Mean squared error vs the exact solver p*_true."""
-    pstar_nn = apply_fn({"params": params}, gas_states_log)
-    gas_states_phys = physics.gas_log_to_phys(gas_states_log)
-    pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states_phys)
+    pstar_nn = apply_fn({"params": params}, gas_states)
+    pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states)
     loss = jnp.mean((pstar_nn - pstar_true) ** 2)
     return loss, {"loss/supervised": loss}
 
@@ -128,7 +108,7 @@ class Phase:
 
     tx: optax gradient transformation (Adam, L-BFGS, ...).
     loss: (params, apply_fn, x) -> (scalar_loss, metrics_dict).
-    sampler: (rng, batch_size, **domain) -> (B, 5) log-space batch.
+    sampler: (rng, batch_size, *, drho_range, dp_range, du_range) -> (B, 3).
     fixed_batch=True keeps one sampled batch for the whole phase (typical for L-BFGS).
     is_lbfgs=True selects the L-BFGS call convention in the step function.
     """
@@ -136,7 +116,7 @@ class Phase:
     n_epochs: int
     loss: Callable
     batch_size: int = 2048
-    sampler: Callable = uniform_log
+    sampler: Callable = uniform
     fixed_batch: bool = False
     is_lbfgs: bool = False
     log_every: int = 200
@@ -147,7 +127,7 @@ class Phase:
 class Experiment:
     """One training experiment.
 
-    domain: sampling + evaluation region. Keys log_rho_range, log_p_range, u_range.
+    domain: sampling + evaluation region. Keys drho_range, dp_range, du_range.
     train_domain: optional override used for sampling during training only.
     corner_every: step interval for the optional corner-trace callback.
     output_root: optional override for the parent directory of this run's
@@ -296,20 +276,19 @@ def load_loss_trace(path: Path) -> np.ndarray | None:
 
 
 def evaluate_holdout(state, n_samples: int = 20_000, seed: int = 999, **domain_kwargs):
-    """Residual + pressure-error metrics on a uniform-log holdout batch."""
+    """Residual + pressure-error metrics on a uniform holdout batch."""
     rng = jr.PRNGKey(seed)
-    gas_states_log = uniform_log(rng, n_samples, **domain_kwargs)
-    gas_states_phys = physics.gas_log_to_phys(gas_states_log)
+    gas_states = uniform(rng, n_samples, **domain_kwargs)
 
-    pstar_nn = state.apply_fn({"params": state.params}, gas_states_log)
-    fstar_vals = jax.vmap(physics.fstar)(pstar_nn, gas_states_phys)
+    pstar_nn = state.apply_fn({"params": state.params}, gas_states)
+    fstar_vals = jax.vmap(physics.fstar)(pstar_nn, gas_states)
 
     metrics: dict[str, Any] = {}
     abs_f = jnp.abs(fstar_vals)
     metrics["median_abs_fstar"] = float(jnp.median(abs_f))
     metrics["p95_abs_fstar"] = float(jnp.percentile(abs_f, 95.0))
 
-    pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states_phys)
+    pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states)
     dlogp = jnp.log10(pstar_nn) - jnp.log10(pstar_true)
     abs_dlogp = np.asarray(jnp.abs(dlogp))
     metrics["median_abs_delta_log10_p"] = float(np.nanmedian(abs_dlogp))
