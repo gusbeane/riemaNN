@@ -106,8 +106,8 @@ def _train_and_eval(
         plot_loss(loss_trace, plots_dir / "loss.png", title=f"Training loss — {name}")
     plot_slice(
         state, plots_dir / "slice.png",
-        log_rho_range=exp.domain["log_rho_range"],
-        log_p_range=exp.domain["log_p_range"],
+        drho_range=exp.domain["drho_range"],
+        dp_range=exp.domain["dp_range"],
         name=name,
     )
     plot_pstar_hist2d(state, plots_dir / "pstar_hist2d.png", name=name, **exp.domain)
