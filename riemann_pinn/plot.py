@@ -17,7 +17,6 @@ from matplotlib.colors import TwoSlopeNorm  # noqa: E402
 from matplotlib.colors import LogNorm  # noqa: E402
 
 from . import physics  # noqa: E402
-from .train import uniform_log  # noqa: E402
 
 
 def plot_loss(loss_trace, out_path: Path, *, title: str = "Training loss") -> None:
