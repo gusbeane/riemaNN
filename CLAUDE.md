@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-riemaNN trains a physics-informed neural network (PINN) to predict the star-region pressure `p*` from left/right gas states by minimizing the squared residual of the exact Riemann jump function `f(p*)`. Python 3.12, JAX + Flax + optax. Ideal gas, `gamma = 5/3`.
+riemaNN trains a physics-informed neural network (PINN) to predict the star-region pressure `p*/p_ref` from a 3D delta gas state by minimizing the squared residual of the exact Riemann jump function `f(p*)`. Python 3.12, JAX + Flax + optax. Ideal gas, `gamma = 5/3`.
 
 ## Running
 
@@ -26,12 +26,15 @@ Note: if `jax-metal` crashes, set `JAX_PLATFORMS=cpu` before running.
 
 ```
 riemann_pinn/
-    physics.py   — Riemann solver: GAMMA, fjump, fstar, dfstar_dp, find_pstar, gas_log_to_phys, sound_speed
-    model.py     — _MLP block + PressureMLP(normalize="none"|"arith"|"geom")
-    train.py     — samplers (uniform_log, r2_quasirandom), losses (residual_loss, residual_loss_normalized,
-                   residual_loss_newton, supervised_loss), Experiment/Phase dataclasses, run_phase/run_experiment,
+    physics.py   — 3D Riemann primitives: GAMMA, ALPHA, BETA, MU, GAS_STATE_DIM (=3),
+                   get_ducrit, ftilde, fstar, dfstar_dp, find_pstar, two_rarefaction_p0
+    model.py     — _MLP block + PressureMLP (3D input -> log-space p*/p_ref)
+    train.py     — samplers (uniform, r2_quasirandom), losses
+                   (residual_loss, residual_loss_newton, supervised_loss),
+                   Experiment/Phase dataclasses, run_phase/run_experiment,
                    checkpoint I/O, evaluate_holdout
-    plot.py      — plot_loss, plot_slice, plot_corner_error, plot_corner_pstar, plot_pstar_hist2d
+    plot.py      — plot_loss, plot_slice, plot_corner_error, plot_corner_pstar,
+                   plot_pstar_hist2d
 run.py           — CLI: load experiments list, train, save metrics, plot
 report.py        — CLI: read metrics.json files, print table
 ```
@@ -46,11 +49,20 @@ Each `Phase` has `tx` (an `optax.GradientTransformation`), `n_epochs`,
 ## Key Conventions
 
 - `jax.config.update("jax_enable_x64", True)` must be set before JAX ops (done in `run.py`).
-- Gas states are length-5: `(rhoL, pL, rhoR, pR, uRL)` in physical space, or `(log10 rhoL, log10 pL, log10 rhoR, log10 pR, uRL)` in log space. `GAS_STATE_DIM = 5` lives in `physics.py`.
-- Network input is log-space; training domain is `log_rho in [-2, 2]`, `log_p in [-2, 2]`, `uRL in [-1, 1]` (overridable per experiment).
+- Gas states are length-3: `(drho, dp, du)` where
+  `drho = (rhoR - rhoL)/(rhoR + rhoL) ∈ [-1, 1]`,
+  `dp   = (pR   - pL)  /(pR   + pL)   ∈ [-1, 1]`,
+  `du   = uRL / ducrit(drho, dp)      ∈ [-∞, 1]`.
+  The non-dimensionalization `p_ref = 1, rho_ref = 1` is implicit:
+  `pL = 1-dp, pR = 1+dp, rhoL = 1-drho, rhoR = 1+drho`. `GAS_STATE_DIM = 3` lives in `physics.py`.
+- Network input is the 3D delta state. Default domain is
+  `drho_range = dp_range = (-0.9, 0.9)`, `du_range = (-3.0, 0.9)`
+  (overridable per experiment).
+- Model output is `10**model(x)`, i.e. `p*/p_ref` in log space — positive by construction.
 - Output artifacts are gitignored.
-- Losses have the signature `(params, apply_fn, gas_states_log) -> (scalar_loss, metrics_dict)`. Custom losses live in the experiment file that needs them and are passed via `Phase(loss=...)`.
+- Losses have the signature `(params, apply_fn, gas_states) -> (scalar_loss, metrics_dict)`. Custom losses live in the experiment file that needs them and are passed via `Phase(loss=...)`.
 - Checkpoints are saved with the last phase's optimizer shape; changing the tail phase's `tx` type invalidates existing checkpoints.
+- `experiments/archive/` holds frozen 5D-era experiments for historical reference; they are not expected to import or run against the current code.
 
 ## Notebooks
 
