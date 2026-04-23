@@ -150,6 +150,8 @@ class Experiment:
     domain: sampling + evaluation region. Keys log_rho_range, log_p_range, u_range.
     train_domain: optional override used for sampling during training only.
     corner_every: step interval for the optional corner-trace callback.
+    output_root: optional override for the parent directory of this run's
+        output folder. If unset, defaults to outputs/<file_stem>/.
     """
     name: str
     model: nn.Module
@@ -158,6 +160,7 @@ class Experiment:
     seed: int = 42
     train_domain: dict | None = None
     corner_every: int = 100
+    output_root: str | Path | None = None
 
 
 # --- train state + steps -----------------------------------------------------

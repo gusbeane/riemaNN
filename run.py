@@ -146,7 +146,8 @@ def main():
         selected = exps
 
     for exp in selected:
-        out_dir = out_root / stem / exp.name
+        parent = Path(exp.output_root) if exp.output_root else out_root / stem
+        out_dir = parent / exp.name
         name = f"{stem}/{exp.name}"
         _train_and_eval(
             exp, exp_path, out_dir, name,

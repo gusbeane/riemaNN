@@ -65,15 +65,16 @@ def main():
     stem = exp_path.stem
     out_root = Path("outputs")
 
-    loaded = [
-        _load_metrics(out_root / stem / e.name / "metrics.json") for e in exps
-    ]
+    def _out_dir(e):
+        return (Path(e.output_root) if e.output_root else out_root / stem) / e.name
+
+    loaded = [_load_metrics(_out_dir(e) / "metrics.json") for e in exps]
 
     if len(exps) == 1:
         m = loaded[0]
         if m is None:
             print(f"{stem}/{exps[0].name}: nr (no metrics.json in "
-                  f"{out_root / stem / exps[0].name})")
+                  f"{_out_dir(exps[0])})")
             return
         width = max(len(_METRIC_LABELS.get(k, k)) for k in m) if m else 0
         for k in sorted(m):
