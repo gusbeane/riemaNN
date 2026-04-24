@@ -13,7 +13,8 @@ venv/bin/python run.py experiments/smoke_test.py --skip-plots    # skip plot gen
 venv/bin/python run.py experiments/foo.py --index 2              # list-valued file: train only experiments[2]
 venv/bin/python run.py experiments/foo.py --count                # print number of experiments
 venv/bin/python report.py experiments/foo.py                     # print metrics table
-./run_grid.sh experiments/foo.py 4                               # fan out a list over 4 workers + report
+venv/bin/python plot_losses.py experiments/foo.py                # overlay all loss curves
+./run_grid.sh experiments/foo.py 4                               # fan out a list over 4 workers + report + loss compare
 ```
 
 Outputs go to `outputs/<file_stem>/<exp.name>/`: `checkpoint.msgpack`,
@@ -37,6 +38,7 @@ riemann_pinn/
                    plot_pstar_hist2d
 run.py           — CLI: load experiments list, train, save metrics, plot
 report.py        — CLI: read metrics.json files, print table
+plot_losses.py   — CLI: overlay each experiment's loss.npy into outputs/<stem>/plots/loss_compare.png
 ```
 
 Experiment files export `experiments = [Experiment(...), ...]` — always a

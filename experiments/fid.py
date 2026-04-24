@@ -16,7 +16,7 @@ _DOMAIN = dict(
     du_range=(-3.0, 0.5),
 )
 
-N_EPOCHS = 100
+N_EPOCHS = 500
 BATCH_SIZE = 2**16 # about 65k
 
 experiments = [
@@ -30,7 +30,8 @@ experiments = [
                 tx=optax.chain(
                     optax.clip_by_global_norm(1.0),
                     optax.adamw(
-                        optax.cosine_decay_schedule(lr, N_EPOCHS, alpha=1e-7),
+                        learning_rate=lr,
+                        # optax.cosine_decay_schedule(lr, N_EPOCHS, alpha=1e-7),
                     ),
                 ),
                 n_epochs=N_EPOCHS,

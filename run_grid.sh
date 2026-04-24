@@ -131,3 +131,5 @@ echo
 echo "All $N runs complete."
 echo
 venv/bin/python report.py "$EXPERIMENT"
+echo
+venv/bin/python plot_losses.py "$EXPERIMENT"
