@@ -18,10 +18,11 @@ _DOMAIN = dict(
 
 N_EPOCHS = 500
 BATCH_SIZE = 2**16 # about 65k
+LR = 2e-3
 
 experiments = [
     Experiment(
-        name=f"lr{lr}",
+        name=f"gold",
         model=PressureMLP(width=16, depth=2),
         domain=_DOMAIN,
         seed=42,
@@ -30,7 +31,7 @@ experiments = [
                 tx=optax.chain(
                     optax.clip_by_global_norm(1.0),
                     optax.adamw(
-                        learning_rate=lr,
+                        learning_rate=LR,
                         # optax.cosine_decay_schedule(lr, N_EPOCHS, alpha=1e-7),
                     ),
                 ),
@@ -39,9 +40,9 @@ experiments = [
                 batch_size=BATCH_SIZE,
                 sampler=uniform,
                 log_every=1,
-                name="adam_cosine",
+                name="adamw",
             ),
         ],
-    ) for lr in [1e-4, 2e-4, 4e-4, 1e-3, 2e-3, 4e-3]
+    )
 ]
 
