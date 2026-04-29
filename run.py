@@ -146,17 +146,20 @@ def _train_and_eval(
     pipeline_time_s = round(time.monotonic() - t0, 1)
 
     # Per-stage metrics: evaluate the running pipeline truncated at each stage.
+    # The last per-stage entry IS the whole-pipeline metrics dict, so we reuse it.
+    stage_metrics: list[dict] = []
     for k, (stage, _state) in enumerate(stage_states):
         sdir = _stage_dir(exp_dir, stage.name)
         m = evaluate_holdout(stage_states[: k + 1], **exp.domain)
+        stage_metrics.append(m)
         with (sdir / "metrics.json").open("w") as f:
             json.dump(m, f, indent=2, sort_keys=True)
         if not skip_plots and traces[k] is not None:
             plot_loss(traces[k], sdir / "plots" / "loss.png",
                       title=f"Training loss — {name}/{stage.name}")
 
-    # Whole-pipeline metrics.
-    metrics = evaluate_holdout(stage_states, **exp.domain)
+    # Whole-pipeline metrics: copy the last per-stage entry and add wall time.
+    metrics = dict(stage_metrics[-1])
     metrics["training_time_s"] = pipeline_time_s
     with (exp_dir / "metrics.json").open("w") as f:
         json.dump(metrics, f, indent=2, sort_keys=True)
@@ -187,6 +190,9 @@ def main():
     ap.add_argument("--count", action="store_true",
                     help="print len(experiments) and exit")
     args = ap.parse_args()
+
+    if args.retrain and args.retrain_from is not None:
+        ap.error("--retrain and --retrain-from are mutually exclusive")
 
     exp_path = Path(args.experiment)
     exps = load_experiments(exp_path)
