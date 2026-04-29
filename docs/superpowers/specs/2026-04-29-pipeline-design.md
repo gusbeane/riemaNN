@@ -166,7 +166,6 @@ Removed:
 - `Phase.is_lbfgs`, `Phase.fixed_batch`, the L-BFGS branch in `make_train_step`.
 - `Experiment.train_domain`, `Experiment.corner_every`, `Experiment.state`,
   `Experiment.prev_stages`, `Experiment.evaluate_all_stages`.
-- `R2QuasirandomSampler`.
 - `supervised_loss` (subsumed by default `make_targets`).
 - `corner_callback` plumbing in `run_phase` / `run_experiment`,
   `--plot-corner-trace`, `corner_frames/` output directory.
@@ -178,6 +177,7 @@ Removed:
 Kept:
 
 - `Phase` (multi-optimizer per NN).
+- `R2QuasirandomSampler` (low-discrepancy alternative to `UniformSampler`).
 - `DataSet` (secondary sampler path; runner-derived targets override its
   stored targets).
 - `evaluate_holdout` and its metrics dict. It now takes a list of
