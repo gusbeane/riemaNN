@@ -165,7 +165,24 @@ class Experiment:
     train_domain: dict | None = None
     corner_every: int = 100
     output_root: str | Path | None = None
+    prev_stages: list[tuple[flax_train_state.TrainState, float]] = field(default_factory=list)
+    state: flax_train_state.TrainState | None = None
 
+    def evaluate_all_stages(self, gas_states):
+        if len(self.prev_stages) == 0:
+            return self.state.apply_fn({"params": self.state.params}, gas_states)
+        
+        all_stages = deepcopy(self.prev_stages)
+        all_stages.append((self.state, jnp.nan))
+        first_state = all_stages[0][0]
+        pstar_nn = first_state.apply_fn({"params": first_state.params}, gas_states)
+        for i in range(1, len(all_stages)):
+            state = all_stages[i][0]
+            eps = all_stages[i-1][1]
+            corr_i = state.apply_fn({"params": state.params}, gas_states)
+            pstar_nn = pstar_nn * corr_i * eps
+        
+        return pstar_nn
 
 # --- train state + steps -----------------------------------------------------
 
@@ -305,7 +322,7 @@ def load_loss_trace(path: Path) -> np.ndarray | None:
 # --- evaluation --------------------------------------------------------------
 
 
-def evaluate_holdout(state, n_samples: int = 20_000, seed: int = 999, **domain_kwargs):
+def evaluate_holdout(exp: Experiment, n_samples: int = 20_000, seed: int = 999, **domain_kwargs):
     """Residual + pressure-error metrics on a uniform holdout batch."""
     rng = jr.PRNGKey(seed)
     sampler = UniformSampler(**domain_kwargs)
@@ -313,7 +330,6 @@ def evaluate_holdout(state, n_samples: int = 20_000, seed: int = 999, **domain_k
 
     pstar_nn = exp.evaluate_all_stages(gas_states)
 
-    pstar_nn = state.apply_fn({"params": state.params}, gas_states)
     fstar_vals = jax.vmap(physics.fstar)(pstar_nn, gas_states)
 
     metrics: dict[str, Any] = {}

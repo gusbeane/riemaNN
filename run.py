@@ -92,7 +92,7 @@ def _train_and_eval(
     out_dir.mkdir(parents=True, exist_ok=True)
     shutil.copy2(exp_path, out_dir / exp_path.name)
 
-    metrics = evaluate_holdout(state, **exp.domain)
+    metrics = evaluate_holdout(exp, **exp.domain)
     if training_time_s is not None:
         metrics["training_time_s"] = training_time_s
     metrics_path.parent.mkdir(parents=True, exist_ok=True)
@@ -105,13 +105,13 @@ def _train_and_eval(
     if loss_trace is not None:
         plot_loss(loss_trace, plots_dir / "loss.png", title=f"Training loss — {name}")
     plot_slice(
-        state, plots_dir / "slice.png",
+        exp, plots_dir / "slice.png",
         drho_range=exp.domain["drho_range"],
         dp_range=exp.domain["dp_range"],
         name=name,
     )
-    plot_pstar_hist2d(state, plots_dir / "pstar_hist2d.png", name=name, **exp.domain)
-    plot_corner_error(state, plots_dir / "corner_error.png", name=name, **exp.domain)
+    plot_pstar_hist2d(exp, plots_dir / "pstar_hist2d.png", name=name, **exp.domain)
+    plot_corner_error(exp, plots_dir / "corner_error.png", name=name, **exp.domain)
     plot_corner_pstar(plots_dir / "corner_pstar.png", name=name, **exp.domain)
 
 
