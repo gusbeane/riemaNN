@@ -3,9 +3,10 @@ checkpoint I/O, eval. All in 3D delta-space."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+from copy import deepcopy
 
 import jax
 import jax.numpy as jnp
@@ -107,30 +108,19 @@ class DataSet:
 # --- losses ------------------------------------------------------------------
 
 
-def residual_loss(params, apply_fn, gas_states):
-    """Mean squared f(p*) residual. Returns (loss, metrics)."""
-    pstar = apply_fn({"params": params}, gas_states)
-    fstar_vals = jax.vmap(physics.fstar)(pstar, gas_states)
-    loss = jnp.mean(fstar_vals ** 2)
-    return loss, {"loss/fstar": loss}
+def residual_loss(params, apply_fn, gas_states, targets):
+    """Mean squared f(p*) residual. Returns scalar loss."""
+    resid_nn = apply_fn({"params": params}, gas_states)
+    loss = jnp.mean((resid_nn - targets) ** 2)
+    return loss
 
 
-def residual_loss_newton(params, apply_fn, gas_states):
-    """Mean of (f/f')^2 -- a proxy for squared pressure error."""
-    pstar = apply_fn({"params": params}, gas_states)
-    fstar_vals = jax.vmap(physics.fstar)(pstar, gas_states)
-    fprime_vals = jax.vmap(physics.dfstar_dp)(pstar, gas_states)
-    weight = jax.lax.stop_gradient(fprime_vals)
-    loss = jnp.mean((fstar_vals / weight) ** 2)
-    return loss, {"loss/newton": loss}
-
-
-def supervised_loss(params, apply_fn, gas_states):
+def supervised_loss(params, apply_fn, gas_states, targets):
     """Mean squared error vs the exact solver p*_true."""
     pstar_nn = apply_fn({"params": params}, gas_states)
     pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states)
     loss = jnp.mean((pstar_nn - pstar_true) ** 2)
-    return loss, {"loss/supervised": loss}
+    return loss
 
 
 # --- experiment types --------------------------------------------------------
@@ -149,8 +139,8 @@ class Phase:
     tx: optax.GradientTransformation
     n_epochs: int
     loss: Callable
-    batch_size: int = 2048
-    sampler: Callable = uniform
+    batch_size: int
+    sampler: DataSet | Sampler
     fixed_batch: bool = False
     is_lbfgs: bool = False
     log_every: int = 200
@@ -190,29 +180,26 @@ def make_train_step(loss_fn: Callable, *, is_lbfgs: bool = False) -> Callable:
     """JITted train step. Branches on is_lbfgs for the optax L-BFGS call convention."""
     if not is_lbfgs:
         @jax.jit
-        def step(state, x):
-            (loss, metrics), grads = jax.value_and_grad(
-                lambda p: loss_fn(p, state.apply_fn, x), has_aux=True,
+        def step(state, x, targets):
+            loss, grads = jax.value_and_grad(
+                lambda p: loss_fn(p, state.apply_fn, x, targets),
             )(state.params)
-            return state.apply_gradients(grads=grads), loss, metrics
+            return state.apply_gradients(grads=grads), loss
         return step
 
     @jax.jit
-    def step(state, x):
-        def value_fn(p):
-            l, _ = loss_fn(p, state.apply_fn, x)
-            return l
-        (loss, metrics), grads = jax.value_and_grad(
-            lambda p: loss_fn(p, state.apply_fn, x), has_aux=True,
+    def step(state, x, targets):
+        loss, grads = jax.value_and_grad(
+            lambda p: loss_fn(p, state.apply_fn, x, targets),
         )(state.params)
         updates, new_opt_state = state.tx.update(
             grads, state.opt_state, state.params,
-            value=loss, grad=grads, value_fn=value_fn,
+            value=loss, grad=grads, value_fn=loss,
         )
         new_params = optax.apply_updates(state.params, updates)
         return state.replace(
             step=state.step + 1, params=new_params, opt_state=new_opt_state,
-        ), loss, metrics
+        ), loss
     return step
 
 
@@ -281,6 +268,7 @@ def run_experiment(exp: Experiment, *, corner_callback: Callable | None = None):
         traces.append(trace)
         step_offset += phase.n_epochs
     full_trace = jnp.concatenate(traces) if traces else jnp.array([])
+    exp.state = state
     return state, full_trace, traces
 
 

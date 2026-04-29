@@ -7,7 +7,7 @@ Minimal working example and the default target for
 import optax
 
 from riemann_pinn.model import PressureMLP
-from riemann_pinn.train import Experiment, Phase, supervised_loss, uniform
+from riemann_pinn.train import Experiment, Phase, supervised_loss, UniformSampler
 
 
 _DOMAIN = dict(
@@ -35,7 +35,7 @@ experiments = [
                 n_epochs=1_000,
                 loss=supervised_loss,
                 batch_size=2048,
-                sampler=uniform,
+                sampler=UniformSampler(**_DOMAIN),
                 log_every=100,
                 name="adam_cosine",
             ),
