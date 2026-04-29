@@ -20,7 +20,7 @@ from tqdm import tqdm
 
 from . import physics
 from .physics import GAS_STATE_DIM
-from .data import DataSet, Sampler, UniformSampler  # noqa: F401
+from .data import DataSet, R2QuasirandomSampler, Sampler, UniformSampler  # noqa: F401
 
 
 # --- losses ------------------------------------------------------------------
