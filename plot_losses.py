@@ -1,9 +1,9 @@
 """Overlay training-loss curves for every experiment in a file.
 
-Reads outputs/<file_stem>/<exp.name>/loss.npy for each experiment and
-writes a single plot to outputs/<file_stem>/plots/loss_compare.png.
-Missing loss traces are skipped with a warning.
-"""
+Reads outputs/<file_stem>/<exp.name>/<stage.name>/loss.npy for each stage
+of each experiment, concatenates them in stage order, and writes a single
+plot to outputs/<file_stem>/plots/loss_compare.png. Missing per-stage
+loss traces are skipped with a warning."""
 
 import argparse
 from pathlib import Path
@@ -21,10 +21,8 @@ from run import load_experiments
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("experiment", help="path to Python experiment file")
-    ap.add_argument(
-        "--out", default=None,
-        help="output path (default: outputs/<stem>/plots/loss_compare.png)",
-    )
+    ap.add_argument("--out", default=None,
+                    help="output path (default: outputs/<stem>/plots/loss_compare.png)")
     args = ap.parse_args()
 
     exp_path = Path(args.experiment)
@@ -32,17 +30,22 @@ def main():
     stem = exp_path.stem
     out_root = Path("outputs")
 
-    def _loss_path(e):
+    def _exp_dir(e):
         parent = Path(e.output_root) if e.output_root else out_root / stem
-        return parent / e.name / "loss.npy"
+        return parent / e.name
 
     traces: list[tuple[str, np.ndarray]] = []
     for e in exps:
-        p = _loss_path(e)
-        if not p.is_file():
-            print(f"warning: no loss.npy for {e.name} (expected {p}); skipping")
-            continue
-        traces.append((e.name, np.load(p)))
+        parts = []
+        for s in e.stages:
+            p = _exp_dir(e) / s.name / "loss.npy"
+            if not p.is_file():
+                print(f"warning: no loss.npy for {e.name}/{s.name} (expected {p}); skipping experiment")
+                parts = None
+                break
+            parts.append(np.load(p))
+        if parts:
+            traces.append((e.name, np.concatenate(parts)))
 
     if not traces:
         raise SystemExit(f"no loss traces found for any experiment in {exp_path}")
