@@ -24,20 +24,39 @@ from .physics import GAS_STATE_DIM
 # --- samplers ----------------------------------------------------------------
 
 
-def uniform(
-    rng,
-    batch_size: int,
-    *,
-    drho_range: tuple[float, float],
-    dp_range: tuple[float, float],
-    du_range: tuple[float, float],
-) -> jnp.ndarray:
-    """Uniform i.i.d. samples in (drho, dp, du). Returns (B, 3)."""
-    keys = jr.split(rng, 3)
-    drho = jr.uniform(keys[0], (batch_size,), minval=drho_range[0], maxval=drho_range[1])
-    dp   = jr.uniform(keys[1], (batch_size,), minval=dp_range[0],   maxval=dp_range[1])
-    du   = jr.uniform(keys[2], (batch_size,), minval=du_range[0],   maxval=du_range[1])
-    return jnp.stack([drho, dp, du], axis=-1)
+from abc import ABC, abstractmethod
+from dataclasses import dataclass
+
+
+class Sampler(ABC):
+    """Base class for samplers that generate gas state batches on the fly."""
+
+    def __init__(
+        self,
+        *,
+        drho_range: tuple[float, float],
+        dp_range: tuple[float, float],
+        du_range: tuple[float, float],
+    ):
+        self.drho_range = drho_range
+        self.dp_range = dp_range
+        self.du_range = du_range
+
+    @abstractmethod
+    def draw_batch(self, rng, batch_size: int) -> jnp.ndarray:
+        """Draw a batch of gas states. Returns (B, 3)."""
+        ...
+
+
+class UniformSampler(Sampler):
+    """Uniform i.i.d. samples in (drho, dp, du)."""
+
+    def draw_batch(self, rng, batch_size: int) -> jnp.ndarray:
+        keys = jr.split(rng, 3)
+        drho = jr.uniform(keys[0], (batch_size,), minval=self.drho_range[0], maxval=self.drho_range[1])
+        dp   = jr.uniform(keys[1], (batch_size,), minval=self.dp_range[0],   maxval=self.dp_range[1])
+        du   = jr.uniform(keys[2], (batch_size,), minval=self.du_range[0],   maxval=self.du_range[1])
+        return jnp.stack([drho, dp, du], axis=-1)
 
 
 # R2 quasirandom additive recurrence. Golden ratios for d=1..12.
@@ -49,25 +68,40 @@ _R2_GOLDEN = jnp.array([
 ])
 
 
-def r2_quasirandom(
-    rng,
-    batch_size: int,
-    *,
-    drho_range: tuple[float, float],
-    dp_range: tuple[float, float],
-    du_range: tuple[float, float],
-) -> jnp.ndarray:
-    """R2 quasirandom samples in (drho, dp, du). Returns (B, 3)."""
+class R2QuasirandomSampler(Sampler):
+    """R2 quasirandom samples in (drho, dp, du)."""
+
     NDIM = 3
-    g = _R2_GOLDEN[NDIM - 1]
-    powers = jnp.arange(1, NDIM + 1, dtype=jnp.float32)
-    a = g ** (-powers)
-    x0 = jr.uniform(rng, (NDIM,), minval=0.0, maxval=1.0)
-    n = jnp.arange(batch_size, dtype=jnp.float32)[:, None]
-    out_unit = jnp.mod(x0[None, :] + n * a[None, :], 1.0)
-    lo = jnp.array([drho_range[0], dp_range[0], du_range[0]], dtype=out_unit.dtype)
-    hi = jnp.array([drho_range[1], dp_range[1], du_range[1]], dtype=out_unit.dtype)
-    return lo + (hi - lo) * out_unit
+
+    def draw_batch(self, rng, batch_size: int) -> jnp.ndarray:
+        g = _R2_GOLDEN[self.NDIM - 1]
+        powers = jnp.arange(1, self.NDIM + 1, dtype=jnp.float32)
+        a = g ** (-powers)
+        x0 = jr.uniform(rng, (self.NDIM,), minval=0.0, maxval=1.0)
+        n = jnp.arange(batch_size, dtype=jnp.float32)[:, None]
+        out_unit = jnp.mod(x0[None, :] + n * a[None, :], 1.0)
+        lo = jnp.array([self.drho_range[0], self.dp_range[0], self.du_range[0]], dtype=out_unit.dtype)
+        hi = jnp.array([self.drho_range[1], self.dp_range[1], self.du_range[1]], dtype=out_unit.dtype)
+        return lo + (hi - lo) * out_unit
+
+
+# --- training sample dataclass ---------------------------------------------
+
+@dataclass
+class DataSet:
+    gas_states: jnp.ndarray   # (N, 3)
+    targets:    jnp.ndarray | None # (N,)
+    head_idx:   int = 0
+
+    def __post_init__(self):
+        assert self.gas_states.shape[0] == self.targets.shape[0], "gas_states and targets must have the same number of samples"
+
+    def draw_batch(self, batch_size: int):
+        assert self.head_idx + batch_size <= self.gas_states.shape[0], "not enough samples left in the dataset"
+        start = self.head_idx
+        end = self.head_idx + batch_size
+        self.head_idx = end
+        return self.gas_states[start:end], self.targets[start:end]
 
 
 # --- losses ------------------------------------------------------------------
@@ -202,8 +236,16 @@ def run_phase(
                 rng, batch_key = jr.split(rng)
         else:
             rng, batch_key = jr.split(rng)
-        batch = phase.sampler(batch_key, phase.batch_size, **domain)
-        state, loss, _metrics = step_fn(state, batch)
+
+        if isinstance(phase.sampler, Sampler):
+            batch = phase.sampler.draw_batch(batch_key, phase.batch_size)
+            targets = None
+        elif isinstance(phase.sampler, DataSet):
+            batch, targets = phase.sampler.draw_batch(phase.batch_size)
+        else:
+            raise ValueError(f"Unsupported sampler type: {type(phase.sampler)}")
+
+        state, loss = step_fn(state, batch, targets)
         loss_trace.append(float(loss))
         if epoch % phase.log_every == 0:
             pbar.set_postfix(loss=f"{loss:.2e}")
@@ -278,7 +320,10 @@ def load_loss_trace(path: Path) -> np.ndarray | None:
 def evaluate_holdout(state, n_samples: int = 20_000, seed: int = 999, **domain_kwargs):
     """Residual + pressure-error metrics on a uniform holdout batch."""
     rng = jr.PRNGKey(seed)
-    gas_states = uniform(rng, n_samples, **domain_kwargs)
+    sampler = UniformSampler(**domain_kwargs)
+    gas_states = sampler.draw_batch(rng, n_samples)
+
+    pstar_nn = exp.evaluate_all_stages(gas_states)
 
     pstar_nn = state.apply_fn({"params": state.params}, gas_states)
     fstar_vals = jax.vmap(physics.fstar)(pstar_nn, gas_states)

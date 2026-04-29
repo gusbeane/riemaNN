@@ -15,7 +15,7 @@ import numpy as np  # noqa: E402
 from matplotlib.colors import LogNorm, TwoSlopeNorm  # noqa: E402
 
 from . import physics  # noqa: E402
-from .train import uniform  # noqa: E402
+from .train import Experiment, UniformSampler  # noqa: E402
 
 
 _VAR_LABELS = [r"$\Delta\rho$", r"$\Delta p$", r"$\Delta u$"]
@@ -272,7 +272,8 @@ def plot_pstar_hist2d(
     import jax.random as jr
 
     rng = jr.PRNGKey(seed)
-    gas_states = uniform(rng, n_samples, **domain_kwargs)
+    sampler = UniformSampler(**domain_kwargs)
+    gas_states = sampler.draw_batch(rng, n_samples)
 
     pstar_nn = state.apply_fn({"params": state.params}, gas_states)
     pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states)

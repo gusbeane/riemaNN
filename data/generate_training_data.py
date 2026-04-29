@@ -21,18 +21,19 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import jax.random as jr
 import numpy as np
+from tqdm import tqdm
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from riemann_pinn import physics
-from riemann_pinn.train import uniform_log
+from riemann_pinn.train import UniformSampler
 
 
-WIDE_TRAIN_DOMAIN = dict(
-    log_rho_range=(-0.2, 2.2),
-    log_p_range=(-0.2, 2.2),
-    u_range=(-0.6, 0.6),
+DOMAIN = dict(
+    drho_range=(-0.9, 0.9),
+    dp_range=(-0.9, 0.9),
+    du_range=(-3.0, 0.5),
 )
 
 
@@ -55,44 +56,45 @@ def generate(
     ys = np.empty((n_samples,), dtype=np.float64)
     rng = jr.PRNGKey(seed)
     t0 = time.time()
-    for start in range(0, n_samples, chunk):
+    for start in tqdm(range(0, n_samples, chunk)):
         end = min(start + chunk, n_samples)
         rng, key = jr.split(rng)
-        batch = uniform_log(key, end - start, **domain)
-        pstar, _ = find_pstar_batch(physics.gas_log_to_phys(batch))
+        sampler = UniformSampler(**domain)
+        batch = sampler.draw_batch(key, end - start)
+        pstar, _ = find_pstar_batch(batch)
         xs[start:end] = np.asarray(batch)
         ys[start:end] = np.asarray(pstar)
         done = end
         rate = done / max(time.time() - t0, 1e-6)
-        print(f"  {done:>10d}/{n_samples}  ({rate:,.0f} samples/s)")
+        # print(f"  {done:>10d}/{n_samples}  ({rate:,.0f} samples/s)")
     return xs, ys
 
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("-n", "--n-samples", type=int, default=10_000_000)
+    ap.add_argument("-n", "--n-samples", type=int, default=100_000_000)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--chunk", type=int, default=1 << 18)
-    ap.add_argument("--log-rho-range", type=float, nargs=2,
-                    default=WIDE_TRAIN_DOMAIN["log_rho_range"])
-    ap.add_argument("--log-p-range", type=float, nargs=2,
-                    default=WIDE_TRAIN_DOMAIN["log_p_range"])
-    ap.add_argument("--u-range", type=float, nargs=2,
-                    default=WIDE_TRAIN_DOMAIN["u_range"])
+    ap.add_argument("--drho-range", type=float, nargs=2,
+                    default=DOMAIN["drho_range"])
+    ap.add_argument("--dp-range", type=float, nargs=2,
+                    default=DOMAIN["dp_range"])
+    ap.add_argument("--du-range", type=float, nargs=2,
+                    default=DOMAIN["du_range"])
     ap.add_argument("-o", "--out", type=Path,
                     default=Path(__file__).parent / "train_10M.npz")
     args = ap.parse_args()
 
     domain = dict(
-        log_rho_range=tuple(args.log_rho_range),
-        log_p_range=tuple(args.log_p_range),
-        u_range=tuple(args.u_range),
+        drho_range=tuple(args.drho_range),
+        dp_range=tuple(args.dp_range),
+        du_range=tuple(args.du_range),
     )
     print(f"Generating {args.n_samples:,} samples in {domain} (seed={args.seed})")
     xs, ys = generate(args.n_samples, args.seed, args.chunk, domain)
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    np.savez(args.out, gas_states_log=xs, pstar=ys, **{
+    np.savez(args.out, gas_states=xs, pstar=ys, **{
         f"domain_{k}": np.asarray(v) for k, v in domain.items()
     })
     digest = _sha256(args.out)

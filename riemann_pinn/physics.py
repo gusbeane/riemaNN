@@ -26,6 +26,9 @@ GAS_STATE_DIM: int = 3
 
 @jax.jit
 def get_ducrit(drho, dp):
+    """Returns the speed of the vacuum solution relative to the reference sound speed.
+    Note that c_ref = sqrt(gamma * p_ref/rho_ref).
+    """
     ansL = jnp.sqrt((1 + dp) / (1 + drho))
     ansR = jnp.sqrt((1 - dp) / (1 - drho))
     return (2.0 / (GAMMA - 1.0)) * (ansL + ansR)
