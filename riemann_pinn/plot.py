@@ -15,7 +15,7 @@ import numpy as np  # noqa: E402
 from matplotlib.colors import LogNorm, TwoSlopeNorm  # noqa: E402
 
 from . import physics  # noqa: E402
-from .train import Experiment, UniformSampler  # noqa: E402
+from .data import UniformSampler  # noqa: E402
 
 
 _VAR_LABELS = [r"$\Delta\rho$", r"$\Delta p$", r"$\Delta u$"]
@@ -37,15 +37,13 @@ def plot_loss(loss_trace, out_path: Path, *, title: str = "Training loss") -> No
 
 
 def plot_slice(
-    exp: Experiment, out_path: Path, *, n: int = 250,
+    predict, out_path: Path, *, n: int = 250,
     drho_range=(-0.9, 0.9), dp_range=(-0.9, 0.9),
     du_slice: float = 0.0,
     err_range=(-0.1, 0.1), nbins: int = 100, name: str | None = None,
 ) -> None:
-    """Three-panel slice: log10(p_NN/p_true) and signed log|f| over (drho, dp)
-    at du = du_slice, plus a histogram of log10(p_NN/p_true) with an L<->R
-    swap sanity-check overlay.
-    """
+    """Three-panel slice over (drho, dp) at du = du_slice. `predict` maps
+    a (B, 3) gas-state batch to a (B,) pstar prediction."""
     dr = jnp.linspace(*drho_range, n)
     dpv = jnp.linspace(*dp_range, n)
     dr_grid, dp_grid = jnp.meshgrid(dr, dpv, indexing="ij")
@@ -54,7 +52,7 @@ def plot_slice(
         jnp.full(n * n, du_slice),
     ], axis=-1)
 
-    pstar_nn = exp.evaluate_all_stages(gas_states)
+    pstar_nn = predict(gas_states)
     pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states)
     fstar_vals = jax.vmap(physics.fstar)(pstar_nn, gas_states)
 
@@ -89,14 +87,9 @@ def plot_slice(
             label=r"$\log_{10}(p^*_{\mathrm{NN}}/p^*_{\mathrm{true}})$")
     ax.set(xlim=err_range, yscale="log")
 
-    # L<->R symmetry sanity check: the physical L<->R swap (spatial
-    # reflection) sends (drho, dp, du) -> (-drho, -dp, +du) -- du is
-    # invariant because swapping labels and negating velocities leaves
-    # uRL = uR - uL unchanged. True p* is invariant, so the NN's
-    # deviation from this invariance is a training-quality metric.
     swap_sign = jnp.array([-1.0, -1.0, 1.0])
     gas_states_swap = gas_states * swap_sign
-    pstar_nn_swap = exp.evaluate_all_stages(gas_states_swap)
+    pstar_nn_swap = predict(gas_states_swap)
     log_ratio_sym = np.asarray(jnp.log10(pstar_nn) - jnp.log10(pstar_nn_swap))
     ax.hist(log_ratio_sym, bins=bins, histtype="step", ec="b", density=True,
             label=r"$\log_{10}(p^*_{\mathrm{NN}}/p^*_{\mathrm{NN,swap}})$")
@@ -110,15 +103,10 @@ def plot_slice(
     plt.close(fig)
 
 
-# --- Corner plots -------------------------------------------------------------
+# --- corner plots ------------------------------------------------------------
 
 
 def _corner_panels(n, *, drho_range, dp_range, du_range):
-    """Build gas-state grids for all 3 lower-triangle variable pairs over
-    (drho, dp, du). Returns (panels, axes_np) where panels is a list of
-    (grid_row, grid_col, gas_states) and axes_np[k] is the 1-D numpy array
-    for variable k.
-    """
     ranges = [drho_range, dp_range, du_range]
     mids = [0.5 * (r[0] + r[1]) for r in ranges]
     axes = [jnp.linspace(r[0], r[1], n) for r in ranges]
@@ -141,7 +129,7 @@ def _corner_panels(n, *, drho_range, dp_range, du_range):
 
 
 def plot_corner_error(
-    exp: Experiment, out_path: Path, *, n: int = 50,
+    predict, out_path: Path, *, n: int = 50,
     drho_range=(-0.9, 0.9), dp_range=(-0.9, 0.9), du_range=(-3.0, 0.9),
     name: str | None = None,
 ) -> None:
@@ -149,9 +137,8 @@ def plot_corner_error(
     panels, axes_np = _corner_panels(
         n, drho_range=drho_range, dp_range=dp_range, du_range=du_range,
     )
-
     all_gas = jnp.concatenate([g for _, _, g in panels], axis=0)
-    pstar_nn_all = exp.evaluate_all_stages(all_gas)
+    pstar_nn_all = predict(all_gas)
     pstar_true_all, _ = jax.vmap(physics.find_pstar)(all_gas)
     log_ratio_all = np.asarray(jnp.log10(pstar_nn_all / pstar_true_all))
 
@@ -210,7 +197,6 @@ def plot_corner_pstar(
     panels, axes_np = _corner_panels(
         n, drho_range=drho_range, dp_range=dp_range, du_range=du_range,
     )
-
     all_gas = jnp.concatenate([g for _, _, g in panels], axis=0)
     pstar_true_all, _ = jax.vmap(physics.find_pstar)(all_gas)
     log_pstar_all = np.asarray(jnp.log10(jnp.maximum(pstar_true_all, 1e-30)))
@@ -264,7 +250,7 @@ def plot_corner_pstar(
 
 
 def plot_pstar_hist2d(
-    exp: Experiment, out_path: Path, *, n_samples: int = 50_000, seed: int = 999,
+    predict, out_path: Path, *, n_samples: int = 50_000, seed: int = 999,
     nbins: int = 200, name: str | None = None,
     **domain_kwargs,
 ) -> None:
@@ -275,7 +261,7 @@ def plot_pstar_hist2d(
     sampler = UniformSampler(**domain_kwargs)
     gas_states = sampler.draw_batch(rng, n_samples)
 
-    pstar_nn = exp.evaluate_all_stages(gas_states)
+    pstar_nn = predict(gas_states)
     pstar_true, _ = jax.vmap(physics.find_pstar)(gas_states)
 
     log_true = np.asarray(jnp.log10(jnp.maximum(pstar_true, 1e-30)))
