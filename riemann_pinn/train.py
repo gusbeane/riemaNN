@@ -144,22 +144,28 @@ def _draw_gas_states(sampler, rng, batch_size):
 
 
 def run_stage(
-    stage: Stage, prev_specs: list[tuple], rng,
+    stage: Stage, prev_specs: list[tuple],
     *, exp_seed: int, stage_index: int,
 ):
-    """Run all phases for one stage. Returns (state, full_loss_trace, per_phase_traces)."""
+    """Run all phases for one stage. Returns (state, full_loss_trace, per_phase_traces).
+
+    All randomness — weight init and per-phase batch sampling — is derived
+    deterministically from `(exp_seed, stage_index, phase_index)` via nested
+    `jr.fold_in`. There is no separate `rng` argument."""
+    stage_rng = jr.fold_in(jr.PRNGKey(exp_seed), stage_index)
     state = None
     traces: list[jnp.ndarray] = []
     for j, phase in enumerate(stage.phases):
+        phase_rng = jr.fold_in(stage_rng, j)
         if state is None:
-            state = create_train_state(rng, stage.model, phase.tx, batch_size_hint=phase.batch_size)
+            init_rng, phase_rng = jr.split(phase_rng)
+            state = create_train_state(init_rng, stage.model, phase.tx, batch_size_hint=phase.batch_size)
         else:
             state = flax_train_state.TrainState.create(
                 apply_fn=state.apply_fn, params=state.params, tx=phase.tx,
             )
         step_fn = _make_step(stage, prev_specs, phase.loss)
         loss_trace: list[float] = []
-        phase_rng = jr.fold_in(jr.PRNGKey(exp_seed), 1000 * (stage_index + 1) + j)
         pbar = tqdm(range(phase.n_epochs), desc=f"  phase[{j}] {phase.name}")
         for epoch in pbar:
             phase_rng, batch_key = jr.split(phase_rng)

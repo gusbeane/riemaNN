@@ -435,22 +435,28 @@ def _draw_gas_states(sampler, rng, batch_size):
 
 
 def run_stage(
-    stage: Stage, prev_specs: list[tuple], rng,
+    stage: Stage, prev_specs: list[tuple],
     *, exp_seed: int, stage_index: int,
 ):
-    """Run all phases for one stage. Returns (state, full_loss_trace, per_phase_traces)."""
+    """Run all phases for one stage. Returns (state, full_loss_trace, per_phase_traces).
+
+    All randomness — weight init and per-phase batch sampling — is derived
+    deterministically from `(exp_seed, stage_index, phase_index)` via nested
+    `jr.fold_in`."""
+    stage_rng = jr.fold_in(jr.PRNGKey(exp_seed), stage_index)
     state = None
     traces: list[jnp.ndarray] = []
     for j, phase in enumerate(stage.phases):
+        phase_rng = jr.fold_in(stage_rng, j)
         if state is None:
-            state = create_train_state(rng, stage.model, phase.tx, batch_size_hint=phase.batch_size)
+            init_rng, phase_rng = jr.split(phase_rng)
+            state = create_train_state(init_rng, stage.model, phase.tx, batch_size_hint=phase.batch_size)
         else:
             state = flax_train_state.TrainState.create(
                 apply_fn=state.apply_fn, params=state.params, tx=phase.tx,
             )
         step_fn = _make_step(stage, prev_specs, phase.loss)
         loss_trace: list[float] = []
-        phase_rng = jr.fold_in(jr.PRNGKey(exp_seed), 1000 * (stage_index + 1) + j)
         pbar = tqdm(range(phase.n_epochs), desc=f"  phase[{j}] {phase.name}")
         for epoch in pbar:
             phase_rng, batch_key = jr.split(phase_rng)
@@ -1047,11 +1053,8 @@ def _train_pipeline(exp: Experiment, exp_dir: Path) -> tuple[list, list]:
     Returns (stage_states, per_stage_traces) where stage_states is a list
     of (Stage, TrainState) and per_stage_traces is a list of np arrays
     aligned with exp.stages."""
-    import jax.random as jr
-
     stage_states: list = []
     traces: list = []
-    rng = jr.PRNGKey(exp.seed)
 
     for i, stage in enumerate(exp.stages):
         sdir = _stage_dir(exp_dir, stage.name)
@@ -1067,10 +1070,9 @@ def _train_pipeline(exp: Experiment, exp_dir: Path) -> tuple[list, list]:
                 (st.apply_fn, st.params, prev_stage.combine)
                 for prev_stage, st in stage_states
             ]
-            sub_rng = jr.fold_in(rng, i + 1)
             t0 = time.monotonic()
             state, trace, _ = run_stage(
-                stage, prev_specs, sub_rng, exp_seed=exp.seed, stage_index=i,
+                stage, prev_specs, exp_seed=exp.seed, stage_index=i,
             )
             elapsed = round(time.monotonic() - t0, 1)
             save_checkpoint(ckpt_path, state)
