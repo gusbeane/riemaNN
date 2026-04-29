@@ -7,19 +7,21 @@ riemaNN trains a physics-informed neural network (PINN) to predict the star-regi
 ## Running
 
 ```bash
-venv/bin/python run.py experiments/smoke_test.py                 # train + evaluate + plot
-venv/bin/python run.py experiments/smoke_test.py --retrain       # ignore checkpoint, train from scratch
-venv/bin/python run.py experiments/smoke_test.py --skip-plots    # skip plot generation
-venv/bin/python run.py experiments/foo.py --index 2              # list-valued file: train only experiments[2]
-venv/bin/python run.py experiments/foo.py --count                # print number of experiments
-venv/bin/python report.py experiments/foo.py                     # print metrics table
-venv/bin/python plot_losses.py experiments/foo.py                # overlay all loss curves
-./run_grid.sh experiments/foo.py 4                               # fan out a list over 4 workers + report + loss compare
+venv/bin/python run.py experiments/smoke_test.py                         # train + evaluate + plot
+venv/bin/python run.py experiments/smoke_test.py --retrain               # wipe and retrain every stage
+venv/bin/python run.py experiments/smoke_test.py --retrain-from main     # retrain from this stage onward
+venv/bin/python run.py experiments/smoke_test.py --skip-plots            # skip plot generation
+venv/bin/python run.py experiments/foo.py --index 2                      # list-valued file: train only experiments[2]
+venv/bin/python run.py experiments/foo.py --count                        # print number of experiments
+venv/bin/python report.py experiments/foo.py                             # print metrics table
+venv/bin/python plot_losses.py experiments/foo.py                        # overlay all loss curves
+./run_grid.sh experiments/foo.py 4                                       # fan out a list over 4 workers + report + loss compare
 ```
 
-Outputs go to `outputs/<file_stem>/<exp.name>/`: `checkpoint.msgpack`,
-`loss.npy`, `metrics.json`, `plots/loss.png`, `plots/slice.png`,
-`plots/pstar_hist2d.png`, `plots/corner_error.png`, `plots/corner_pstar.png`.
+Outputs go to `outputs/<file_stem>/<exp.name>/`:
+- `metrics.json` — whole-pipeline holdout metrics
+- `plots/` — combined-pipeline slice / hist2d / corner plots
+- `<stage.name>/checkpoint.msgpack`, `loss.npy`, `metrics.json`, `plots/loss.png` — per stage
 
 Note: if `jax-metal` crashes, set `JAX_PLATFORMS=cpu` before running.
 
@@ -29,24 +31,27 @@ Note: if `jax-metal` crashes, set `JAX_PLATFORMS=cpu` before running.
 riemann_pinn/
     physics.py   — 3D Riemann primitives: GAMMA, ALPHA, BETA, MU, GAS_STATE_DIM (=3),
                    get_ducrit, ftilde, fstar, dfstar_dp, find_pstar, two_rarefaction_p0
-    model.py     — _MLP block + PressureMLP (3D input -> log-space p*/p_ref)
-    train.py     — samplers (uniform, r2_quasirandom), losses
-                   (residual_loss, residual_loss_newton, supervised_loss),
-                   Experiment/Phase dataclasses, run_phase/run_experiment,
+    data.py      — Sampler ABC, UniformSampler, R2QuasirandomSampler, DataSet
+    model.py     — _MLP block + PressureMLP (3D input -> p*/p_ref via callable
+                   output_transform, default 10**y)
+    train.py     — Experiment / Stage / Phase dataclasses, mse_loss,
+                   pipeline runner (run_stage), predict_pipeline,
                    checkpoint I/O, evaluate_holdout
     plot.py      — plot_loss, plot_slice, plot_corner_error, plot_corner_pstar,
-                   plot_pstar_hist2d
-run.py           — CLI: load experiments list, train, save metrics, plot
-report.py        — CLI: read metrics.json files, print table
-plot_losses.py   — CLI: overlay each experiment's loss.npy into outputs/<stem>/plots/loss_compare.png
+                   plot_pstar_hist2d (all take a `predict` callable)
+run.py           — CLI: load experiments, train each stage (skipping cached
+                   checkpoints), save metrics, plot
+report.py        — CLI: read whole-pipeline metrics.json files, print table
+plot_losses.py   — CLI: concatenate per-stage loss.npy curves and overlay
+                   them in outputs/<stem>/plots/loss_compare.png
 ```
 
-Experiment files export `experiments = [Experiment(...), ...]` — always a
-list (one-element lists are fine). Each `Experiment` has `name`, `model`,
-`domain`, `phases`, `seed` (and optional `train_domain`, `corner_every`).
-Each `Phase` has `tx` (an `optax.GradientTransformation`), `n_epochs`,
-`loss` (a callable), plus `batch_size`, `sampler`, `fixed_batch`,
-`is_lbfgs`, `log_every`, `name`.
+Experiment files export `experiments = [Experiment(...), ...]`. Each
+`Experiment` has `name`, `seed`, `domain`, `stages`. Each `Stage` has
+`name`, `model`, `phases`, plus optional `make_targets` / `combine`
+callables (multiplicative defaults). Each `Phase` has `tx`
+(`optax.GradientTransformation`), `n_epochs`, `loss`, `batch_size`,
+`sampler`, `log_every`, `name`.
 
 ## Key Conventions
 
@@ -62,7 +67,7 @@ Each `Phase` has `tx` (an `optax.GradientTransformation`), `n_epochs`,
   (overridable per experiment).
 - Model output is `10**model(x)`, i.e. `p*/p_ref` in log space — positive by construction.
 - Output artifacts are gitignored.
-- Losses have the signature `(params, apply_fn, gas_states) -> (scalar_loss, metrics_dict)`. Custom losses live in the experiment file that needs them and are passed via `Phase(loss=...)`.
+- Losses have the signature `(params, apply_fn, gas_states, targets) -> scalar`. The runner derives `targets` outside the loss via `Stage.make_targets(prev_running, pstar_true)` and threads them in. The default loss is `mse_loss`. Stage-level chaining is controlled by `Stage.make_targets` and `Stage.combine` (defaults: multiplicative residual / running product).
 - Checkpoints are saved with the last phase's optimizer shape; changing the tail phase's `tx` type invalidates existing checkpoints.
 - `experiments/archive/` holds frozen 5D-era experiments for historical reference; they are not expected to import or run against the current code.
 
