@@ -1,13 +1,10 @@
-"""Smoke test: short AdamW run to verify the 3D delta-space pipeline.
-
-Minimal working example and the default target for
-`venv/bin/python run.py experiments/smoke_test.py`.
-"""
+"""Sweep AdamW learning rate on the gold-style architecture."""
 
 import optax
 
+from riemann_pinn.data import UniformSampler
 from riemann_pinn.model import PressureMLP
-from riemann_pinn.train import Experiment, Phase, supervised_loss, uniform
+from riemann_pinn.train import Experiment, Phase, Stage, mse_loss
 
 
 _DOMAIN = dict(
@@ -17,31 +14,34 @@ _DOMAIN = dict(
 )
 
 N_EPOCHS = 500
-BATCH_SIZE = 2**16 # about 65k
+BATCH_SIZE = 2**16
+
 
 experiments = [
     Experiment(
         name=f"lr{lr}",
-        model=PressureMLP(width=16, depth=2),
-        domain=_DOMAIN,
         seed=42,
-        phases=[
-            Phase(
-                tx=optax.chain(
-                    optax.clip_by_global_norm(1.0),
-                    optax.adamw(
-                        learning_rate=lr,
-                        # optax.cosine_decay_schedule(lr, N_EPOCHS, alpha=1e-7),
+        domain=_DOMAIN,
+        stages=[
+            Stage(
+                name="main",
+                model=PressureMLP(width=16, depth=2),
+                phases=[
+                    Phase(
+                        tx=optax.chain(
+                            optax.clip_by_global_norm(1.0),
+                            optax.adamw(learning_rate=lr),
+                        ),
+                        n_epochs=N_EPOCHS,
+                        loss=mse_loss,
+                        batch_size=BATCH_SIZE,
+                        sampler=UniformSampler(**_DOMAIN),
+                        log_every=1,
+                        name="adamw",
                     ),
-                ),
-                n_epochs=N_EPOCHS,
-                loss=supervised_loss,
-                batch_size=BATCH_SIZE,
-                sampler=uniform,
-                log_every=1,
-                name="adam_cosine",
+                ],
             ),
         ],
-    ) for lr in [1e-4, 2e-4, 4e-4, 1e-3, 2e-3, 4e-3, 8e-3]
+    )
+    for lr in [1e-4, 2e-4, 4e-4, 1e-3, 2e-3, 4e-3, 8e-3]
 ]
-

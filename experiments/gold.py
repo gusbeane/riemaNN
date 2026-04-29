@@ -1,13 +1,10 @@
-"""Smoke test: short AdamW run to verify the 3D delta-space pipeline.
-
-Minimal working example and the default target for
-`venv/bin/python run.py experiments/smoke_test.py`.
-"""
+"""Gold reference network: single-stage AdamW training in the 3D delta-space."""
 
 import optax
 
+from riemann_pinn.data import UniformSampler
 from riemann_pinn.model import PressureMLP
-from riemann_pinn.train import Experiment, Phase, supervised_loss, UniformSampler
+from riemann_pinn.train import Experiment, Phase, Stage, mse_loss
 
 
 _DOMAIN = dict(
@@ -17,32 +14,34 @@ _DOMAIN = dict(
 )
 
 N_EPOCHS = 500
-BATCH_SIZE = 2**16 # about 65k
+BATCH_SIZE = 2**16
 LR = 2e-3
+
 
 experiments = [
     Experiment(
-        name=f"gold",
-        model=PressureMLP(width=16, depth=2),
-        domain=_DOMAIN,
+        name="gold",
         seed=42,
-        phases=[
-            Phase(
-                tx=optax.chain(
-                    optax.clip_by_global_norm(1.0),
-                    optax.adamw(
-                        learning_rate=LR,
-                        # optax.cosine_decay_schedule(lr, N_EPOCHS, alpha=1e-7),
+        domain=_DOMAIN,
+        stages=[
+            Stage(
+                name="main",
+                model=PressureMLP(width=16, depth=2),
+                phases=[
+                    Phase(
+                        tx=optax.chain(
+                            optax.clip_by_global_norm(1.0),
+                            optax.adamw(learning_rate=LR),
+                        ),
+                        n_epochs=N_EPOCHS,
+                        loss=mse_loss,
+                        batch_size=BATCH_SIZE,
+                        sampler=UniformSampler(**_DOMAIN),
+                        log_every=1,
+                        name="adamw",
                     ),
-                ),
-                n_epochs=N_EPOCHS,
-                loss=supervised_loss,
-                batch_size=BATCH_SIZE,
-                sampler=UniformSampler(**_DOMAIN),
-                log_every=1,
-                name="adamw",
+                ],
             ),
         ],
-    )
+    ),
 ]
-
