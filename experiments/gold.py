@@ -4,7 +4,7 @@ import optax
 
 from riemann_pinn.data import UniformSampler
 from riemann_pinn.model import PressureMLP
-from riemann_pinn.train import Experiment, Phase, Stage, mse_loss
+from riemann_pinn.train import Experiment, Phase, Stage, mse_log_loss
 
 
 _DOMAIN = dict(
@@ -15,7 +15,7 @@ _DOMAIN = dict(
 
 N_EPOCHS = 500
 BATCH_SIZE = 2**16
-LR = 2e-3
+LR = 0.06
 
 
 experiments = [
@@ -34,7 +34,7 @@ experiments = [
                             optax.adamw(learning_rate=LR),
                         ),
                         n_epochs=N_EPOCHS,
-                        loss=mse_loss,
+                        loss=mse_log_loss,
                         batch_size=BATCH_SIZE,
                         sampler=UniformSampler(**_DOMAIN),
                         log_every=1,

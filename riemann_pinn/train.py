@@ -31,6 +31,11 @@ def mse_loss(params, apply_fn, gas_states, targets):
     pred = apply_fn({"params": params}, gas_states)
     return jnp.mean((pred - targets) ** 2)
 
+def mse_log_loss(params, apply_fn, gas_states, targets):
+    """Mean squared error between the network output and runner-derived targets."""
+    pred = apply_fn({"params": params}, gas_states)
+    return jnp.mean((jnp.log10(pred) - jnp.log10(targets)) ** 2)
+
 
 # --- composition defaults ----------------------------------------------------
 
