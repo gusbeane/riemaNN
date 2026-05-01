@@ -253,15 +253,16 @@ def evaluate_holdout(stage_states, n_samples: int = 20_000, seed: int = 999, **d
     metrics["median_abs_fstar"] = float(jnp.median(abs_f))
     metrics["p95_abs_fstar"]    = float(jnp.percentile(abs_f, 95.0))
 
-    dlogp = jnp.log10(pstar_nn) - jnp.log10(pstar_true)
-    abs_dlogp = np.asarray(jnp.abs(dlogp))
-    metrics["median_abs_delta_log10_p"] = float(np.nanmedian(abs_dlogp))
-    metrics["p95_abs_delta_log10_p"]    = float(np.nanpercentile(abs_dlogp, 95.0))
-
     abs_absolute = np.asarray(jnp.abs(pstar_nn - pstar_true))
     metrics["abs_absolute_median"] = float(np.nanmedian(abs_absolute))
     metrics["abs_absolute_p95"]    = float(np.nanpercentile(abs_absolute, 95.0))
     metrics["abs_absolute_p5"]     = float(np.nanpercentile(abs_absolute, 5.0))
+
+    abs_relative = np.asarray(jnp.abs((pstar_nn - pstar_true) / pstar_true))
+    metrics["abs_relative_p5"]     = float(np.nanpercentile(abs_relative, 5.0))
+    metrics["abs_relative_median"] = float(np.nanmedian(abs_relative))
+    metrics["abs_relative_p95"]    = float(np.nanpercentile(abs_relative, 95.0))
+    metrics["abs_relative_max"]    = float(np.nanmax(abs_relative))
 
     metrics["any_nan_nn"]   = "true" if bool(jnp.any(jnp.isnan(pstar_nn)))   else "false"
     metrics["any_nan_true"] = "true" if bool(jnp.any(jnp.isnan(pstar_true))) else "false"
