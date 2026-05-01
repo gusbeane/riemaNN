@@ -42,8 +42,12 @@ def plot_slice(
     du_slice: float = 0.0,
     err_range=(-0.1, 0.1), nbins: int = 100, name: str | None = None,
 ) -> None:
-    """Three-panel slice over (drho, dp) at du = du_slice. `predict` maps
-    a (B, 3) gas-state batch to a (B,) pstar prediction."""
+    """Slice plots over (drho, dp) at du = du_slice.
+
+    `predict` maps a (B, 3) gas-state batch to a (B,) pstar prediction.
+    Writes the two-panel field plot to `out_path` and the relative-error
+    histogram to a sibling `*_relative_error.png` file.
+    """
     dr = jnp.linspace(*drho_range, n)
     dpv = jnp.linspace(*dp_range, n)
     dr_grid, dp_grid = jnp.meshgrid(dr, dpv, indexing="ij")
@@ -69,8 +73,8 @@ def plot_slice(
         "signed_f": r"$\mathrm{sign}(f)\,\log_{10}|f(p^*_{\mathrm{NN}})|$",
     }
 
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-    for ax, z, key in zip(axes[:2], [log_ratio, signed_f], ["log_ratio", "signed_f"]):
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4))
+    for ax, z, key in zip(axes, [log_ratio, signed_f], ["log_ratio", "signed_f"]):
         v = float(np.nanmax(np.abs(z)))
         if not np.isfinite(v) or v == 0.0:
             v = 1e-6
@@ -81,25 +85,40 @@ def plot_slice(
         ax.set_title(titles[key] + f" @ $\\Delta u={du_slice:g}$")
         fig.colorbar(c, ax=ax)
 
-    ax = axes[2]
-    bins = np.linspace(err_range[0], err_range[1], nbins)
-    ax.hist(log_ratio.ravel(), bins=bins, histtype="step", ec="k", density=True,
-            label=r"$\log_{10}(p^*_{\mathrm{NN}}/p^*_{\mathrm{true}})$")
-    ax.set(xlim=err_range, yscale="log")
-
-    swap_sign = jnp.array([-1.0, -1.0, 1.0])
-    gas_states_swap = gas_states * swap_sign
-    pstar_nn_swap = predict(gas_states_swap)
-    log_ratio_sym = np.asarray(jnp.log10(pstar_nn) - jnp.log10(pstar_nn_swap))
-    ax.hist(log_ratio_sym, bins=bins, histtype="step", ec="b", density=True,
-            label=r"$\log_{10}(p^*_{\mathrm{NN}}/p^*_{\mathrm{NN,swap}})$")
-    ax.legend(fontsize=8)
-
     if name:
         fig.suptitle(name)
     plt.tight_layout()
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+
+    fig, ax = plt.subplots(1, 1, figsize=(6, 4))
+    bins = np.linspace(err_range[0], err_range[1], nbins)
+    rel_error = np.asarray(((pstar_nn - pstar_true) / pstar_true).reshape(n, n))
+    ax.hist(rel_error.ravel(), bins=bins, histtype="step", ec="k", density=True,
+            label=r"$(p^*_{\mathrm{NN}} - p^*_{\mathrm{true}}) / p^*_{\mathrm{true}}$")
+    ax.set(xlim=err_range, yscale="log")
+
+    swap_sign = jnp.array([-1.0, -1.0, 1.0])
+    gas_states_swap = gas_states * swap_sign
+    pstar_nn_swap = predict(gas_states_swap)
+    rel_error_sym = np.asarray(
+        (pstar_nn - pstar_nn_swap) / (0.5 * (pstar_nn + pstar_nn_swap))
+    )
+    ax.hist(rel_error_sym, bins=bins, histtype="step", ec="b", density=True,
+            label=(
+                r"$(p^*_{\mathrm{NN}} - p^*_{\mathrm{NN,swap}}) / "
+                r"\left(0.5(p^*_{\mathrm{NN}} + p^*_{\mathrm{NN,swap}})\right)$"
+            ))
+    ax.set_xlabel("relative error")
+    ax.set_title(f"Relative errors @ $\\Delta u={du_slice:g}$")
+    ax.legend(fontsize=8)
+
+    if name:
+        fig.suptitle(name)
+    plt.tight_layout()
+    err_out_path = out_path.with_name(f"{out_path.stem}_relative_error{out_path.suffix}")
+    fig.savefig(err_out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
 
 
