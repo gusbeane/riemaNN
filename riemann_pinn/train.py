@@ -66,6 +66,7 @@ class Phase:
     sampler: Sampler | DataSet
     log_every: int = 200
     name: str = "phase"
+    fixed_batch: bool = False
 
 
 @dataclass
@@ -128,10 +129,20 @@ def _make_step(stage: Stage, prev_specs: list[tuple], loss_fn: Callable) -> Call
             out = prev_apply({"params": prev_params}, gas_states)
             prev_running = prev_combine(prev_running, out)
         targets = make_targets(prev_running, pstar_true)
-        loss, grads = jax.value_and_grad(
-            lambda p: loss_fn(p, state.apply_fn, gas_states, targets),
-        )(state.params)
-        return state.apply_gradients(grads=grads), loss
+
+        def value_fn(params):
+            return loss_fn(params, state.apply_fn, gas_states, targets)
+
+        loss, grads = jax.value_and_grad(value_fn)(state.params)
+        updates, new_opt_state = state.tx.update(
+            grads, state.opt_state, state.params,
+            value=loss, grad=grads, value_fn=value_fn,
+        )
+        new_params = optax.apply_updates(state.params, updates)
+        new_state = state.replace(
+            step=state.step + 1, params=new_params, opt_state=new_opt_state,
+        )
+        return new_state, loss
 
     return step
 
@@ -172,9 +183,16 @@ def run_stage(
         step_fn = _make_step(stage, prev_specs, phase.loss)
         loss_trace: list[float] = []
         pbar = tqdm(range(phase.n_epochs), desc=f"  phase[{j}] {phase.name}")
-        for epoch in pbar:
+        fixed_gs = None
+        if phase.fixed_batch:
             phase_rng, batch_key = jr.split(phase_rng)
-            gas_states = _draw_gas_states(phase.sampler, batch_key, phase.batch_size)
+            fixed_gs = _draw_gas_states(phase.sampler, batch_key, phase.batch_size)
+        for epoch in pbar:
+            if fixed_gs is None:
+                phase_rng, batch_key = jr.split(phase_rng)
+                gas_states = _draw_gas_states(phase.sampler, batch_key, phase.batch_size)
+            else:
+                gas_states = fixed_gs
             state, loss = step_fn(state, gas_states)
             loss_trace.append(float(loss))
             if epoch % phase.log_every == 0:

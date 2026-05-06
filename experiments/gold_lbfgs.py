@@ -1,0 +1,59 @@
+"""Gold reference network with an L-BFGS polish: phase 0 is the gold AdamW
+phase, phase 1 runs deterministic L-BFGS on a single fixed batch."""
+
+import optax
+
+from riemann_pinn.data import UniformSampler
+from riemann_pinn.model import PressureMLP
+from riemann_pinn.train import Experiment, Phase, Stage, mse_log_loss
+
+
+_DOMAIN = dict(
+    drho_range=(-0.9, 0.9),
+    dp_range=(-0.9, 0.9),
+    du_range=(-3.0, 0.5),
+)
+
+ADAMW_EPOCHS = 500
+LBFGS_EPOCHS = 500
+BATCH_SIZE = 2**16
+LR = 0.06
+
+
+experiments = [
+    Experiment(
+        name="gold_lbfgs",
+        seed=42,
+        domain=_DOMAIN,
+        stages=[
+            Stage(
+                name="main",
+                model=PressureMLP(width=16, depth=2),
+                phases=[
+                    Phase(
+                        tx=optax.chain(
+                            optax.clip_by_global_norm(1.0),
+                            optax.adamw(learning_rate=LR),
+                        ),
+                        n_epochs=ADAMW_EPOCHS,
+                        loss=mse_log_loss,
+                        batch_size=BATCH_SIZE,
+                        sampler=UniformSampler(**_DOMAIN),
+                        log_every=1,
+                        name="adamw",
+                    ),
+                    Phase(
+                        tx=optax.lbfgs(),
+                        n_epochs=LBFGS_EPOCHS,
+                        loss=mse_log_loss,
+                        batch_size=BATCH_SIZE,
+                        sampler=UniformSampler(**_DOMAIN),
+                        log_every=1,
+                        name="lbfgs",
+                        fixed_batch=True,
+                    ),
+                ],
+            ),
+        ],
+    ),
+]
