@@ -10,3 +10,4 @@ outputs*/
 .claude/
 .worktrees/
 note/*.pdf
+note/trace
