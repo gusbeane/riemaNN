@@ -168,6 +168,28 @@ def loss(x: jax.Array, net) -> jax.Array:
 # ---------------------------------------------------------------------------
 # Training stages
 
+@nnx.jit
+def _adam_step(F_net: MLP, opt: nnx.Optimizer, batch: jax.Array) -> jax.Array:
+    loss_val, grads = nnx.value_and_grad(lambda net: loss(batch, net))(F_net)
+    opt.update(F_net, grads)
+    return loss_val
+
+
+@nnx.jit
+def _lbfgs_step(F_net: MLP, opt: nnx.Optimizer, x_batch: jax.Array) -> jax.Array:
+    def loss_fn(m):
+        return loss(x_batch, m)
+
+    graphdef, _params, rest = nnx.split(F_net, nnx.Param, ...)
+    loss_val, grads = nnx.value_and_grad(loss_fn)(F_net)
+
+    def value_fn(trial_params):
+        return loss_fn(nnx.merge(graphdef, trial_params, rest))
+
+    opt.update(F_net, grads, value=loss_val, grad=grads, value_fn=value_fn)
+    return loss_val
+
+
 def train_adam(
     F_net: MLP,
     *,
@@ -187,8 +209,7 @@ def train_adam(
     for i in pbar:
         subkey, key = jr.split(key)
         batch = sampler.draw_batch(subkey, batch_size, 3, TRAIN_BOUNDS)
-        loss_val, grads = nnx.value_and_grad(lambda net: loss(batch, net))(F_net)
-        opt.update(F_net, grads)
+        loss_val = _adam_step(F_net, opt, batch)
         writer.record_loss(loss_val)
 
         global_step = step_offset + i
@@ -213,23 +234,14 @@ def train_lbfgs(
     x_batch = sampler.draw_batch(jr.PRNGKey(batch_seed), batch_size, 3, TRAIN_BOUNDS)
     opt = nnx.Optimizer(F_net, optax.lbfgs(), wrt=nnx.Param)
 
-    def loss_lbfgs(m):
-        return loss(x_batch, m)
-
     pbar = tqdm(range(1, n_steps + 1), desc="lbfgs")
     for i in pbar:
-        graphdef, params, rest = nnx.split(F_net, nnx.Param, ...)
-        loss_val, grads = nnx.value_and_grad(loss_lbfgs)(F_net)
-
-        def value_fn(trial_params, _graphdef=graphdef, _rest=rest):
-            return loss_lbfgs(nnx.merge(_graphdef, trial_params, _rest))
-
-        opt.update(F_net, grads, value=loss_val, grad=grads, value_fn=value_fn)
-        post_loss = float(loss_lbfgs(F_net))
-        writer.record_loss(post_loss)
+        loss_val = _lbfgs_step(F_net, opt, x_batch)
+        writer.record_loss(loss_val)
 
         global_step = step_offset + i
-        pbar.set_description(f"lbfgs loss={post_loss:.4e}")
+        if i % 10 == 0:
+            pbar.set_description(f"lbfgs loss={float(loss_val):.4e}")
         if global_step % flush_every == 0 or i == n_steps:
             writer.flush(global_step, "lbfgs", F_net)
         if i==0:

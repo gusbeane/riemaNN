@@ -120,15 +120,18 @@ class CheckpointWriter:
         with self.metrics_path.open("w", newline="") as f:
             csv.writer(f).writerow(["step", "stage", "loss", *metric_keys])
 
-        self._pending: list[float] = []
+        self._pending: list = []
 
     def record_loss(self, loss_val) -> None:
-        self._pending.append(float(loss_val))
+        # `loss_val` may be a jax device array; defer the host sync until
+        # `flush` so we don't block the training step.
+        self._pending.append(loss_val)
 
     def flush(self, step: int, stage: str, F_net: nnx.Module) -> dict[str, float]:
+        pending = [float(lv) for lv in self._pending]
         with self.losses_path.open("a") as f:
-            f.writelines(f"{lv:.10e}\n" for lv in self._pending)
-        last_loss = self._pending[-1] if self._pending else float("nan")
+            f.writelines(f"{lv:.10e}\n" for lv in pending)
+        last_loss = pending[-1] if pending else float("nan")
         self._pending.clear()
 
         metrics = self.evaluate_fn(F_net)
