@@ -196,7 +196,8 @@ def train_adam(
             pbar.set_description(f"adam loss={float(loss_val):.4e}")
         if global_step % flush_every == 0 or i == n_steps:
             writer.flush(global_step, "adam", F_net)
-
+        if i==0:
+            pbar.reset(total=n_steps-1)
 
 def train_lbfgs(
     F_net: MLP,
@@ -231,6 +232,8 @@ def train_lbfgs(
         pbar.set_description(f"lbfgs loss={post_loss:.4e}")
         if global_step % flush_every == 0 or i == n_steps:
             writer.flush(global_step, "lbfgs", F_net)
+        if i==0:
+            pbar.reset(total=n_steps-1)
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +251,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--flush-every", type=int, default=100)
     p.add_argument("--eval-batch-size", type=int, default=2**17)
+    p.add_argument("--adam-batch-size", type=int, default=2**17)
+    p.add_argument("--lbfgs-batch-size", type=int, default=2**17)
     p.add_argument("--eval-seed", type=int, default=123)
     p.add_argument("--skip-lbfgs", action="store_true")
     args = p.parse_args(argv)
@@ -273,6 +278,7 @@ def main(argv: list[str] | None = None) -> None:
         F_net,
         writer=writer,
         n_steps=args.adam_steps,
+        batch_size=args.adam_batch_size,
         step_offset=0,
         flush_every=args.flush_every,
     )
@@ -281,6 +287,7 @@ def main(argv: list[str] | None = None) -> None:
             F_net,
             writer=writer,
             n_steps=args.lbfgs_steps,
+            batch_size=args.lbfgs_batch_size,
             step_offset=args.adam_steps,
             flush_every=args.flush_every,
         )
