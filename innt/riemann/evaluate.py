@@ -34,7 +34,16 @@ def errors_on(
     err = F_pred - F_exact
     l2 = float(jnp.sqrt(jnp.mean(err**2)))
     linf = float(jnp.max(jnp.abs(err)))
-    return l2, linf
+    rel_l2 = l2 / jnp.sqrt(jnp.mean(F_exact**2))
+
+    # flat_idx = jnp.argmax(jnp.abs(err))
+    # idx = jnp.unravel_index(flat_idx, err.shape)
+    # max_err = err[idx]
+    # rel_linf = jnp.abs(max_err / F_exact[idx])
+
+    rel_linf = jnp.max(jnp.abs(err / F_exact))
+
+    return l2, linf, rel_l2, rel_linf
 
 
 def evaluate_all(
@@ -46,9 +55,11 @@ def evaluate_all(
 ) -> dict[str, float]:
     metrics: dict[str, float] = {}
     for label, x_eval in regimes.items():
-        l2, linf = errors_on(F_net, x_eval, F_pred_fn, F_true_fn)
+        l2, linf, rel_l2, rel_linf = errors_on(F_net, x_eval, F_pred_fn, F_true_fn)
         metrics[f"l2_{label}"] = l2
         metrics[f"linf_{label}"] = linf
+        metrics[f"rel_l2_{label}"] = rel_l2
+        metrics[f"rel_linf_{label}"] = rel_linf
     return metrics
 
 

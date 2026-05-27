@@ -350,12 +350,17 @@ def compute_flux(t, gas_state, uL=0.0):
     rho, u, e = sample_origin(gas_state, pstar, uL)
     p = (GAMMA - 1.0) * rho * e
     E = rho * e + 0.5 * rho * u**2
-    flux = t * jnp.array([
+    flux = jnp.array([
         rho * u,
         rho * u**2 + p,
         u * (E + p),
     ])
     return flux
+
+
+def compute_integrated_flux(t, gas_state, uL=0.0):
+    flux = compute_flux(t, gas_state, uL)
+    return t * flux
 
 
 if __name__ == "__main__":

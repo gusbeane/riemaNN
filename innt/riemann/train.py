@@ -35,9 +35,10 @@ from evaluate import (  # noqa: E402
     evaluate_all,
     metric_keys_for,
 )
-from physics import find_pstar, compute_flux
+from physics import find_pstar, compute_flux, compute_integrated_flux
 
-FLUX_SCALE = jnp.array([10.0, 1e3, 1e5])
+# FLUX_SCALE = jnp.array([10.0, 1e3, 1e5])
+FLUX_SCALE = jnp.array([1.0, 1.0, 1.0])
 
 
 def F_pred(F_net, x):
@@ -58,7 +59,7 @@ def F_true(x: jax.Array) -> jax.Array:
     """
     t = x[0]
     gas_state = jnp.array([x[1], x[2], x[3]])
-    return compute_flux(t, gas_state)
+    return compute_integrated_flux(t, gas_state)
 
 
 # ---------------------------------------------------------------------------
@@ -91,9 +92,9 @@ def _build_model(arch: dict) -> MLP:
 # Sampler + training/eval bounds
 
 # (t, drho, dp, du)
-TRAIN_BOUNDS      = jnp.array([[0., 1.0], [-1.0, 1.0], [-1.0, 1.0], [-2.0, 0.4]])
-FULL_BOUNDS       = jnp.array([[0., 1.0], [-1.0, 1.0], [-1.0, 1.0], [-2.0, 0.4]])
-RESTRICTED_BOUNDS = jnp.array([[0., 0.8], [0.0, 0.8], [-0.8, 0.8], [-0.8, 0.3]])
+TRAIN_BOUNDS      = jnp.array([[0., 1.0], [-0.8, 0.8], [-0.8, 0.8], [-1.0, 0.4]])
+FULL_BOUNDS       = jnp.array([[0., 1.0], [-0.8, 0.8], [-0.8, 0.8], [-1.0, 0.4]])
+RESTRICTED_BOUNDS = jnp.array([[0., 0.8], [-0.6, 0.6], [-0.6, 0.6], [-0.8, 0.3]])
 
 
 class UniformRandomSampler:
@@ -126,30 +127,39 @@ def print_metrics(m: Mapping[str, float]) -> None:
     """
     tqdm.write(
         f"  full       (t<1.0, |drho|,|dp|<=1.0, du in [-2,1])  : "
-        f"L2={m['l2_full']:.6e}  Linf={m['linf_full']:.6e}"
+        f"L2={m['l2_full']:.3e} (rel={m['rel_l2_full']:.3e})  "
+        f"Linf={m['linf_full']:.3e} (rel={m['rel_linf_full']:.3e})"
     )
     tqdm.write(
         f"  restricted (t<0.8, drho in [0,0.8], |dp|,|du|<=0.8) : "
-        f"L2={m['l2_restricted']:.6e}  Linf={m['linf_restricted']:.6e}"
+        f"L2={m['l2_restricted']:.3e} (rel={m['rel_l2_restricted']:.3e})  "
+        f"Linf={m['linf_restricted']:.3e} (rel={m['rel_linf_restricted']:.3e})"
     )
     tqdm.write(
         f"  small jump (|drho|,|dp|,|du|<=1e-2)                 : "
-        f"L2={m['l2_small_jump']:.6e}  Linf={m['linf_small_jump']:.6e}"
+        f"L2={m['l2_small_jump']:.3e} (rel={m['rel_l2_small_jump']:.3e})  "
+        f"Linf={m['linf_small_jump']:.3e} (rel={m['rel_linf_small_jump']:.3e})"
     )
 
 
 # ---------------------------------------------------------------------------
 # Loss
 
-def loss(x: jax.Array, net) -> jax.Array:
+def loss(x: jax.Array, net, scale: float = 1.0) -> jax.Array:
     F = lambda r: r[..., 0] * net(r)
     F_t_eval = jax.vmap(jax.jacfwd(F))(x)[..., 0]
 
     compute_flux_x = lambda x: compute_flux(x[0], jnp.array([x[1], x[2], x[3]]))
     flux_eval = jax.vmap(compute_flux_x)(x)
+    
+    # return jnp.mean(jnp.log(jnp.abs(F_t_eval/flux_eval)))
+    # return jnp.mean((jnp.log(F_t_eval) - jnp.log(flux_eval))**2)
+    return jnp.mean((jnp.arcsinh(F_t_eval / scale) - jnp.arcsinh(flux_eval / scale)) ** 2)
+    
     # return jnp.mean((F_t_eval - flux_eval) ** 2 / FLUX_SCALE**2)
-    err = (F_t_eval - flux_eval) / FLUX_SCALE
-    return jnp.mean(optax.huber_loss(err, delta=1.0))
+    
+    # err = (F_t_eval - flux_eval) / FLUX_SCALE
+    # return jnp.mean(optax.huber_loss(err, delta=1.0))
 
 
 # ---------------------------------------------------------------------------
@@ -253,6 +263,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--eval-batch-size", type=int, default=2**17)
     p.add_argument("--adam-batch-size", type=int, default=2**17)
     p.add_argument("--lbfgs-batch-size", type=int, default=2**17)
+    p.add_argument("--adam-lr", type=float, default=1e-3)
     p.add_argument("--eval-seed", type=int, default=123)
     p.add_argument("--skip-lbfgs", action="store_true")
     args = p.parse_args(argv)
@@ -283,6 +294,7 @@ def main(argv: list[str] | None = None) -> None:
         batch_size=args.adam_batch_size,
         step_offset=0,
         flush_every=args.flush_every,
+        lr=args.adam_lr,
     )
     if not args.skip_lbfgs:
         train_lbfgs(
