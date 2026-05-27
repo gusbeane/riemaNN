@@ -17,6 +17,7 @@ So c_ref**2 = p_ref / rho_ref.
 from __future__ import annotations
 
 import jax
+jax.config.update('jax_enable_x64', True)
 import jax.numpy as jnp
 from typing import NamedTuple
 
@@ -24,8 +25,6 @@ GAMMA: float = 5.0 / 3.0
 ALPHA: float = (GAMMA - 1.0) / (2.0 * GAMMA)
 BETA: float = (GAMMA - 1.0) / (GAMMA + 1.0)
 MU: float = (GAMMA - 1.0) / 2.0
-
-GAS_STATE_DIM: int = 3
 
 class GasState(NamedTuple):
     rhoL: jax.Array
@@ -54,6 +53,14 @@ class GasState(NamedTuple):
     @property
     def aR(self):
         return jnp.sqrt(GAMMA * self.pR / self.rhoR)
+
+    @property
+    def ucrit(self):
+        return (self.aL + self.aR) / MU
+    
+    @property
+    def is_vacuum(self):
+        return self.uRL >= self.ucrit
     
     def rhoK(self, LR: int):
         """Returns rhoL if LR == -1, rhoR if LR == +1."""
@@ -69,14 +76,9 @@ class GasState(NamedTuple):
    
 
 @jax.jit
-def get_ducrit(drho, dp):
-    """Returns the speed of the vacuum solution relative to the reference sound speed.
-    Note that c_ref = sqrt(p_ref/rho_ref).
-    """
-    ansL = jnp.sqrt((1 + dp) / (1 + drho))
-    ansR = jnp.sqrt((1 - dp) / (1 - drho))
-    return (2.0 * jnp.sqrt(GAMMA) / (GAMMA - 1.0)) * (ansL + ansR)
-
+def get_ucrit(gs: GasState):
+    """Returns the vacuum solution speed."""
+    return (gs.aL + gs.aR) / MU
 
 @jax.jit
 def ftilde_one(p: float, gs: GasState, LR: int):
@@ -199,28 +201,38 @@ def _bisect(gs: GasState):
 
 @jax.jit
 def find_pstar(gs: GasState):
-    """Find p* via Newton with bisection fallback; returns (pstar, residual)."""
+    """Find p* via Newton with bisection fallback; returns (pstar, residual).
     
-    p_newton, f_newton = _newton(gs)
+    Returns (p*=0, 0) if uRL > critical velocity (vacuum state).
+    """
+    
+    def normal_case(_):
+        p_newton, f_newton = _newton(gs)
+        newton_ok = (
+            jnp.isfinite(p_newton)
+            & jnp.isfinite(f_newton)
+            & (p_newton > 0)
+            & (jnp.abs(f_newton) < 1e-12)
+        )
+        p_bisect, f_bisect = jax.lax.cond(
+            newton_ok,
+            lambda _: (p_newton, f_newton),
+            lambda _: _bisect(gs),
+            None,
+        )
+        return p_bisect, f_bisect
 
-    newton_ok = (
-        jnp.isfinite(p_newton)
-        & jnp.isfinite(f_newton)
-        & (p_newton > 0)
-        & (jnp.abs(f_newton) < 1e-12)
-    )
-
-    p_bisect, f_bisect = jax.lax.cond(
-        newton_ok,
-        lambda _: (p_newton, f_newton),
-        lambda _: _bisect(gs),
+    pstar, fresid = jax.lax.cond(
+        gs.is_vacuum,
+        lambda _: (0.0, 0.0),
+        normal_case,
         None,
     )
-    return p_bisect, f_bisect
+    return pstar, fresid
 
 
 @jax.jit
-def sample_origin(gas_state, pstar, uL=0.0):
+def sample_origin(gs: GasState, pstar: float, uL: float = 0.0):
     """Return rho, u, e at x=0, t>0.
 
     Velocities are in units of u_ref = sqrt(p_ref / rho_ref).
@@ -228,22 +240,15 @@ def sample_origin(gas_state, pstar, uL=0.0):
 
     uL fixes the Galilean frame. If uL=0, then uR = du * ducrit.
     """
-    drho, dp, du = gas_state
 
-    rhoL = 1.0 - drho
-    rhoR = 1.0 + drho
-    pL = 1.0 - dp
-    pR = 1.0 + dp
+    rhoL, pL, rhoR, pR, uRL = gs.rhoL, gs.pL, gs.rhoR, gs.pR, gs.uRL
 
-    ducrit = get_ducrit(drho, dp)
-    uR = uL + du * ducrit
+    uR = uRL + uL
 
-    # Sound speeds divided by c_ref.
-    aL = jnp.sqrt(GAMMA * pL / rhoL)
-    aR = jnp.sqrt(GAMMA * pR / rhoR)
+    aL, aR = gs.aL, gs.aR
 
-    fL = ftilde(pstar, drho, dp, -1)
-    fR = ftilde(pstar, drho, dp, +1)
+    fL = ftilde_one(pstar, gs, -1)
+    fR = ftilde_one(pstar, gs, +1)
 
     ustar_L = uL - fL
     ustar_R = uR + fR
@@ -405,19 +410,25 @@ def compute_integrated_flux(t, gas_state, uL=0.0):
 
 if __name__ == "__main__":
     # gas_state = jnp.array([0.1, 0.1, 0.1])
+    gs = GasState(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=10.)
+    pstar, f_star = find_pstar(gs)
+    print('pstar:', pstar)
+    print('f_star:', f_star)
+    print()
+    
     gs = GasState(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=0.3)
     pstar, f_star = find_pstar(gs)
     print('pstar:', pstar)
     print('f_star:', f_star)
     print()
 
-    rho, u, e = sample_origin(gas_state, pstar)
+    rho, u, e = sample_origin(gs, pstar, 0.0)
     print('rho:', rho)
     print('u:', u)
     print('e:', e)
     print()
 
-    flux = compute_flux(1.0, gas_state, pstar)
+    flux = compute_flux(1.0, gs, 0.0)
     print('mass flux:', flux[0])
     print('momentum flux:', flux[1])
     print('energy flux:', flux[2])
@@ -428,15 +439,17 @@ if __name__ == "__main__":
     def check(label, gas_state, expected_pstar):
         pstar, residual = find_pstar(gas_state)
         err = float(jnp.abs(pstar - expected_pstar))
+        fstar = fstar_one(pstar, gas_state)
         print(f"{label}:")
         print(f"  gas_state = {gas_state}")
-        print(f"  pstar     = {pstar}  (expected {expected_pstar})")
-        print(f"  |err|     = {err:.2e}, residual = {float(residual):.2e}")
+        print(f"  pstar     = {pstar:.3e}")
+        # print(f"  |err|     = {err:.2e}, residual = {float(residual):.2e}")
+        print(f"  fstar     = {fstar:.3e}")
 
     # 1. Trivial constant state: identical L/R, no waves => p* = 1.
     check(
         "constant state",
-        jnp.array([0.0, 0.0, 0.0]),
+        GasState(rhoL=1.0, pL=1.0, rhoR=1.0, pR=1.0, uRL=0.0),
         1.0,
     )
 
@@ -444,15 +457,23 @@ if __name__ == "__main__":
     #    jump. The Riemann fan is a single stationary contact => p* = 1.
     check(
         "stationary contact",
-        jnp.array([0.3, 0.0, 0.0]),
+        GasState(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=0.0),
         1.0,
     )
 
     # 3. Symmetric two-rarefaction (drho = dp = 0, du > 0). The jump function
     #    collapses to (p^ALPHA - 1) + du = 0, giving p* = (1 - du)^(1/ALPHA).
     du = 0.2
+    gs = GasState(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=du)
     check(
         "symmetric two-rarefaction",
-        jnp.array([0.0, 0.0, du]),
+        gs,
         (1.0 - du) ** (1.0 / ALPHA),
+    )
+
+    # 4. Test 2 vacuum case from Toro Table 4.1.
+    check(
+        "vacuum case",
+        GasState(rhoL=1.0, pL=0.4, rhoR=1.0, pR=0.4, uRL=4.),
+        0.00189,
     )
