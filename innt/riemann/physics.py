@@ -93,17 +93,15 @@ dfstar_dp = jax.grad(fstar, argnums=0)
 
 
 @jax.jit
-def two_rarefaction_p0(gas_state):
+def two_rarefaction_p0(gs: GasState):
     """3D two-rarefaction p* guess (Toro eq. 4.46), dimensionless.
 
     Used only as the Newton / bisection starting point inside find_pstar.
     """
-    drho, dp, du = gas_state
-    cL = jnp.sqrt(GAMMA * (1 - dp) / (1 - drho))
-    cR = jnp.sqrt(GAMMA * (1 + dp) / (1 + drho))
-    ducrit = get_ducrit(drho, dp)
-    num = jnp.maximum(cL + cR - MU * du * ducrit, 1e-30)
-    den = cL / (1 - dp) ** ALPHA + cR / (1 + dp) ** ALPHA
+    aL = gs.aL ; aR = gs.aR
+
+    num = aL + aR - MU * gs.uRL
+    den = aL / gs.pL ** ALPHA + aR / gs.pR ** ALPHA
     return (num / den) ** (1.0 / ALPHA)
 
 
@@ -186,9 +184,9 @@ def _bisect(gas_state):
 
 
 @jax.jit
-def find_pstar(gas_state):
+def find_pstar(gs: GasState):
     """Find p* via Newton with bisection fallback; returns (pstar, residual)."""
-    p0 = jnp.maximum(two_rarefaction_p0(gas_state), 1e-30)
+    p0 = jnp.maximum(two_rarefaction_p0(gs), 1e-30)
     p_newton, f_newton = _newton(gas_state, p0)
 
     newton_ok = (
