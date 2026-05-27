@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import jax
 import jax.numpy as jnp
+from typing import NamedTuple
 
 GAMMA: float = 5.0 / 3.0
 ALPHA: float = (GAMMA - 1.0) / (2.0 * GAMMA)
@@ -26,6 +27,33 @@ MU: float = (GAMMA - 1.0) / 2.0
 
 GAS_STATE_DIM: int = 3
 
+class GasState(NamedTuple):
+    rhoL: jax.Array
+    pL:   jax.Array
+    rhoR: jax.Array
+    pR:   jax.Array
+    uRL:  jax.Array
+
+    @classmethod
+    def from_array(cls, x):
+        return cls(
+            rhoL=x[..., 0],
+            pL=x[..., 1],
+            rhoR=x[..., 2],
+            pR=x[..., 3],
+            uRL=x[..., 4],
+        )
+    
+    def as_array(self):
+        return jnp.stack([self.rhoL, self.pL, self.rhoR, self.pR, self.uRL], axis=-1)
+    
+    @property
+    def aL(self):
+        return jnp.sqrt(GAMMA * self.pL / self.rhoL)
+    
+    @property
+    def aR(self):
+        return jnp.sqrt(GAMMA * self.pR / self.rhoR)
 
 @jax.jit
 def get_ducrit(drho, dp):
