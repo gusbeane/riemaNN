@@ -26,26 +26,54 @@ ALPHA: float = (GAMMA - 1.0) / (2.0 * GAMMA)
 BETA: float = (GAMMA - 1.0) / (GAMMA + 1.0)
 MU: float = (GAMMA - 1.0) / 2.0
 
+GAS_STATE_DIM: int = 5
+
 class GasState(NamedTuple):
-    rhoL: jax.Array
-    pL:   jax.Array
-    rhoR: jax.Array
-    pR:   jax.Array
-    uRL:  jax.Array
+    log10_rhoL: jax.Array
+    log10_pL:   jax.Array
+    log10_rhoR: jax.Array
+    log10_pR:   jax.Array
+    uRL:        jax.Array
 
     @classmethod
     def from_array(cls, x):
         return cls(
-            rhoL=x[..., 0],
-            pL=x[..., 1],
-            rhoR=x[..., 2],
-            pR=x[..., 3],
+            log10_rhoL=x[..., 0],
+            log10_pL=x[..., 1],
+            log10_rhoR=x[..., 2],
+            log10_pR=x[..., 3],
             uRL=x[..., 4],
         )
     
+    @classmethod
+    def from_linear(cls, *, rhoL: float, pL: float, rhoR: float, pR: float, uRL: float):
+        return cls(
+            log10_rhoL=jnp.log10(rhoL),
+            log10_pL=jnp.log10(pL),
+            log10_rhoR=jnp.log10(rhoR),
+            log10_pR=jnp.log10(pR),
+            uRL=uRL,
+        )
+   
     def as_array(self):
-        return jnp.stack([self.rhoL, self.pL, self.rhoR, self.pR, self.uRL], axis=-1)
+        return jnp.stack([self.log10_rhoL, self.log10_pL, self.log10_rhoR, self.log10_pR, self.uRL], axis=-1)
     
+    @property
+    def rhoL(self):
+        return 10.0 ** self.log10_rhoL
+    
+    @property
+    def pL(self):
+        return 10.0 ** self.log10_pL
+    
+    @property
+    def rhoR(self):
+        return 10.0 ** self.log10_rhoR
+    
+    @property
+    def pR(self):
+        return 10.0 ** self.log10_pR
+
     @property
     def aL(self):
         return jnp.sqrt(GAMMA * self.pL / self.rhoL)
@@ -63,22 +91,14 @@ class GasState(NamedTuple):
         return self.uRL >= self.ucrit
     
     def rhoK(self, LR: int):
-        """Returns rhoL if LR == -1, rhoR if LR == +1."""
         return jnp.where(LR == -1, self.rhoL, self.rhoR)
 
     def pK(self, LR: int):
-        """Returns pL if LR == -1, pR if LR == +1."""
         return jnp.where(LR == -1, self.pL, self.pR)
     
     def aK(self, LR: int):
-        """Returns aL if LR == -1, aR if LR == +1."""
         return jnp.where(LR == -1, self.aL, self.aR)
    
-
-@jax.jit
-def get_ucrit(gs: GasState):
-    """Returns the vacuum solution speed."""
-    return (gs.aL + gs.aR) / MU
 
 @jax.jit
 def ftilde_one(p: float, gs: GasState, LR: int):
@@ -410,13 +430,13 @@ def compute_integrated_flux(t, gas_state, uL=0.0):
 
 if __name__ == "__main__":
     # gas_state = jnp.array([0.1, 0.1, 0.1])
-    gs = GasState(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=10.)
+    gs = GasState.from_linear(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=10.)
     pstar, f_star = find_pstar(gs)
     print('pstar:', pstar)
     print('f_star:', f_star)
     print()
     
-    gs = GasState(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=0.3)
+    gs = GasState.from_linear(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=0.3)
     pstar, f_star = find_pstar(gs)
     print('pstar:', pstar)
     print('f_star:', f_star)
@@ -449,7 +469,7 @@ if __name__ == "__main__":
     # 1. Trivial constant state: identical L/R, no waves => p* = 1.
     check(
         "constant state",
-        GasState(rhoL=1.0, pL=1.0, rhoR=1.0, pR=1.0, uRL=0.0),
+        GasState.from_linear(rhoL=1.0, pL=1.0, rhoR=1.0, pR=1.0, uRL=0.0),
         1.0,
     )
 
@@ -457,14 +477,14 @@ if __name__ == "__main__":
     #    jump. The Riemann fan is a single stationary contact => p* = 1.
     check(
         "stationary contact",
-        GasState(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=0.0),
+        GasState.from_linear(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=0.0),
         1.0,
     )
 
     # 3. Symmetric two-rarefaction (drho = dp = 0, du > 0). The jump function
     #    collapses to (p^ALPHA - 1) + du = 0, giving p* = (1 - du)^(1/ALPHA).
     du = 0.2
-    gs = GasState(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=du)
+    gs = GasState.from_linear(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=du)
     check(
         "symmetric two-rarefaction",
         gs,
@@ -474,6 +494,6 @@ if __name__ == "__main__":
     # 4. Test 2 vacuum case from Toro Table 4.1.
     check(
         "vacuum case",
-        GasState(rhoL=1.0, pL=0.4, rhoR=1.0, pR=0.4, uRL=4.),
+        GasState.from_linear(rhoL=1.0, pL=0.4, rhoR=1.0, pR=0.4, uRL=4.),
         0.00189,
     )
