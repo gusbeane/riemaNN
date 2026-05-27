@@ -35,7 +35,7 @@ from evaluate import (  # noqa: E402
     evaluate_all,
     metric_keys_for,
 )
-from physics import find_pstar, compute_flux, compute_integrated_flux
+from physics import find_pstar, compute_flux, compute_integrated_flux, GAS_STATE_DIM, GasState
 
 # FLUX_SCALE = jnp.array([10.0, 1e3, 1e5])
 FLUX_SCALE = jnp.array([1.0, 1.0, 1.0])
@@ -58,8 +58,8 @@ def F_true(x: jax.Array) -> jax.Array:
     is exactly what `compute_flux` returns.
     """
     t = x[0]
-    gas_state = jnp.array([x[1], x[2], x[3]])
-    return compute_integrated_flux(t, gas_state)
+    gs = GasState.from_array(x[1:])
+    return compute_integrated_flux(t, gs)
 
 
 # ---------------------------------------------------------------------------
@@ -92,9 +92,14 @@ def _build_model(arch: dict) -> MLP:
 # Sampler + training/eval bounds
 
 # (t, drho, dp, du)
-TRAIN_BOUNDS      = jnp.array([[0., 1.0], [-0.8, 0.8], [-0.8, 0.8], [-1.0, 0.4]])
-FULL_BOUNDS       = jnp.array([[0., 1.0], [-0.8, 0.8], [-0.8, 0.8], [-1.0, 0.4]])
-RESTRICTED_BOUNDS = jnp.array([[0., 0.8], [-0.6, 0.6], [-0.6, 0.6], [-0.8, 0.3]])
+# TRAIN_BOUNDS      = jnp.array([[0., 1.0], [-0.8, 0.8], [-0.8, 0.8], [-1.0, 0.4]])
+# FULL_BOUNDS       = jnp.array([[0., 1.0], [-0.8, 0.8], [-0.8, 0.8], [-1.0, 0.4]])
+# RESTRICTED_BOUNDS = jnp.array([[0., 0.8], [-0.6, 0.6], [-0.6, 0.6], [-0.8, 0.3]])
+
+# (t, log10_rhoL, log10_pL, log10_rhoR, log10_pR, uRL)
+TRAIN_BOUNDS      = jnp.array([[0., 1.0], [-2., 2.], [-2., 2.], [-2., 2.], [-2., 2.], [-1., 1.]])
+FULL_BOUNDS       = jnp.array([[0., 1.0], [-2., 2.], [-2., 2.], [-2., 2.], [-2., 2.], [-1., 1.]])
+RESTRICTED_BOUNDS = jnp.array([[0., 0.8], [-1.5, 1.5], [-1.5, 1.5], [-1.5, 1.5], [-1.5, 1.5], [-0.8, 0.8]])
 
 
 class UniformRandomSampler:
@@ -149,14 +154,14 @@ def loss(x: jax.Array, net, scale: float = 1.0) -> jax.Array:
     F = lambda r: r[..., 0] * net(r)
     F_t_eval = jax.vmap(jax.jacfwd(F))(x)[..., 0]
 
-    compute_flux_x = lambda x: compute_flux(x[0], jnp.array([x[1], x[2], x[3]]))
-    flux_eval = jax.vmap(compute_flux_x)(x)
+    compute_flux_of_x = lambda x: compute_flux(x[0], GasState.from_array(x[1:]))
+    flux_eval = jax.vmap(compute_flux_of_x)(x)
     
     # return jnp.mean(jnp.log(jnp.abs(F_t_eval/flux_eval)))
     # return jnp.mean((jnp.log(F_t_eval) - jnp.log(flux_eval))**2)
-    return jnp.mean((jnp.arcsinh(F_t_eval / scale) - jnp.arcsinh(flux_eval / scale)) ** 2)
+    # return jnp.mean((jnp.arcsinh(F_t_eval / scale) - jnp.arcsinh(flux_eval / scale)) ** 2)
     
-    # return jnp.mean((F_t_eval - flux_eval) ** 2 / FLUX_SCALE**2)
+    return jnp.mean((F_t_eval - flux_eval) ** 2 / FLUX_SCALE**2)
     
     # err = (F_t_eval - flux_eval) / FLUX_SCALE
     # return jnp.mean(optax.huber_loss(err, delta=1.0))
@@ -206,7 +211,7 @@ def train_adam(
     pbar = tqdm(range(1, n_steps + 1), desc="adam")
     for i in pbar:
         subkey, key = jr.split(key)
-        batch = sampler.draw_batch(subkey, batch_size, 4, TRAIN_BOUNDS)
+        batch = sampler.draw_batch(subkey, batch_size, GAS_STATE_DIM+1, TRAIN_BOUNDS)
         loss_val = _adam_step(F_net, opt, batch)
         writer.record_loss(loss_val)
 
@@ -229,7 +234,7 @@ def train_lbfgs(
     batch_seed: int = 42,
 ) -> None:
     sampler = UniformRandomSampler()
-    x_batch = sampler.draw_batch(jr.PRNGKey(batch_seed), batch_size, 4, TRAIN_BOUNDS)
+    x_batch = sampler.draw_batch(jr.PRNGKey(batch_seed), batch_size, GAS_STATE_DIM+1, TRAIN_BOUNDS)
     opt = nnx.Optimizer(F_net, optax.lbfgs(), wrt=nnx.Param)
 
     pbar = tqdm(range(1, n_steps + 1), desc="lbfgs")
@@ -268,7 +273,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--skip-lbfgs", action="store_true")
     args = p.parse_args(argv)
 
-    arch = {"in_dim": 4, "width": 32, "depth": 3, "out_dim": 3}
+    arch = {"in_dim": GAS_STATE_DIM+1, "width": 32, "depth": 3, "out_dim": 3}
     F_net = init_nn(**arch, seed=args.seed)
 
     eval_key = jr.PRNGKey(args.eval_seed)

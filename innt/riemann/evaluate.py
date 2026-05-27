@@ -16,6 +16,7 @@ The sampling helpers (`draw_rect`, `draw_small_jumps`) encode the Riemann
 from __future__ import annotations
 
 from typing import Callable, Mapping
+from physics import GasState
 
 import jax
 import jax.numpy as jnp
@@ -87,7 +88,7 @@ def draw_small_jumps(
     key: jax.Array,
     batch_size: int,
     *,
-    jump_max: float = 1e-2,
+    jump_max_rel: float = 1e-3,
     t_max: float = 1.0,
 ) -> jax.Array:
     """Batch of `(t, drho, dp, du)` with `|drho|, |dp|, |du| <= jump_max`.
@@ -97,7 +98,33 @@ def draw_small_jumps(
     the network in the weak-jump limit, which the full uniform sampler covers
     with vanishing probability.
     """
-    k_t, k_j = jr.split(key, 2)
+    k_t, k_j, k_r = jr.split(key, 3)
     t = jr.uniform(k_t, (batch_size,), minval=0.0, maxval=t_max)
-    jumps = jr.uniform(k_j, (batch_size, 3), minval=-jump_max, maxval=jump_max)
-    return jnp.concatenate([t[:, None], jumps], axis=-1)
+    # For each sample, first draw log10_rhoL, log10_pL, uRL uniformly from restricted bounds.
+    # Then, for each, draw an 'r' in [-jump_max_rel, jump_max_rel] for the ratio, and compute R as L * (1 + r).
+    from train import RESTRICTED_BOUNDS  # if not already imported at top; else remove this import
+
+    # Pull L component values from the restricted domain
+    # indexes: [1]=log10_rhoL, [2]=log10_pL, [5]=uRL (as in train.py)
+    l_lo = RESTRICTED_BOUNDS[[1,2,5], 0]
+    l_hi = RESTRICTED_BOUNDS[[1,2,5], 1]
+    # Sample log10_rhoL, log10_pL, and uRL
+    u_L = jr.uniform(k_j, (batch_size, 3), minval=0.0, maxval=1.0)
+    L_vals = l_lo + (l_hi - l_lo) * u_L  # shape (batch_size, 3)
+
+    # Convert to linear
+    L_vals_lin = 10.0 ** L_vals
+
+    # For each, sample r in [-jump_max_rel, jump_max_rel]
+    r = jr.uniform(k_r, (batch_size, 3), minval=-jump_max_rel, maxval=jump_max_rel)
+
+    # Compute right state values in delta terms.
+    R_vals_lin = L_vals_lin * (1.0 + r)
+    R_vals = jnp.log10(R_vals_lin)
+
+    out = jnp.stack(
+        [t, L_vals[:, 0], L_vals[:, 1], R_vals[:, 0], R_vals[:, 1], R_vals[:, 2] - L_vals[:, 2]],
+        axis=-1,
+    )
+
+    return out
