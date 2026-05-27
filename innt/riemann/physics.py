@@ -54,6 +54,19 @@ class GasState(NamedTuple):
     @property
     def aR(self):
         return jnp.sqrt(GAMMA * self.pR / self.rhoR)
+    
+    def rhoK(self, LR: int):
+        """Returns rhoL if LR == -1, rhoR if LR == +1."""
+        return jnp.where(LR == -1, self.rhoL, self.rhoR)
+
+    def pK(self, LR: int):
+        """Returns pL if LR == -1, pR if LR == +1."""
+        return jnp.where(LR == -1, self.pL, self.pR)
+    
+    def aK(self, LR: int):
+        """Returns aL if LR == -1, aR if LR == +1."""
+        return jnp.where(LR == -1, self.aL, self.aR)
+   
 
 @jax.jit
 def get_ducrit(drho, dp):
@@ -66,30 +79,29 @@ def get_ducrit(drho, dp):
 
 
 @jax.jit
-def ftilde(p, drho, dp, LR):
+def ftilde_one(p: float, gs: GasState, LR: int):
     """Contribution of one side (K = L or R) to the Riemann star-pressure equation.
 
     LR = -1 for L, +1 for R.
     """
-    AK = jnp.sqrt(2.0 / ((GAMMA + 1.0) * (1 + LR * drho)))
-    BK = BETA * (1 + LR * dp)
 
-    shock = (p - (1 + LR * dp)) * AK / jnp.sqrt(p + BK)
-    rarefaction = (1.0 / MU) * jnp.sqrt(
-        GAMMA * (1 + LR * dp) / (1 + LR * drho)
-    ) * ((p / (1 + LR * dp)) ** ALPHA - 1.0)
-    return jnp.where(p > (1 + LR * dp), shock, rarefaction)
+    rhoK, pK, aK = gs.rhoK(LR), gs.pK(LR), gs.aK(LR)
+    AK = 2/((GAMMA + 1.) * rhoK)
+    BK = BETA * pK
+
+    shock = (p - pK) * jnp.sqrt(AK / (p + BK))
+    rarefaction = (aK / MU) * ((p / pK) ** ALPHA - 1.)
+
+    return jnp.where(p > pK, shock, rarefaction)
 
 
 @jax.jit
-def fstar(p, gas_state):
+def fstar_one(p: float, gs: GasState):
     """Residual of the Riemann star-pressure equation; zero at the true p*."""
-    drho, dp, du = gas_state
-    ducrit = get_ducrit(drho, dp)
-    return (ftilde(p, drho, dp, -1) + ftilde(p, drho, dp, 1)) / ducrit + du
+    return ftilde_one(p, gs, -1) + ftilde_one(p, gs, +1) + gs.uRL
 
 
-dfstar_dp = jax.grad(fstar, argnums=0)
+dfstar_dp_one = jax.grad(fstar_one, argnums=0)
 
 
 @jax.jit
@@ -106,8 +118,10 @@ def two_rarefaction_p0(gs: GasState):
 
 
 @jax.jit
-def _newton(gas_state, p0):
+def _newton(gs: GasState):
     """Newton iteration for p*. Fast but can diverge."""
+
+    p0 = jnp.maximum(two_rarefaction_p0(gs), 1e-30)
 
     def cond(state):
         pstar, pstar_prev, fstar_, i = state
@@ -120,29 +134,29 @@ def _newton(gas_state, p0):
     def body(state):
         pstar, _pstar_prev, _, i = state
         pstar_prev = pstar
-        fstar_ = fstar(pstar, gas_state)
-        dfstar_ = dfstar_dp(pstar, gas_state)
+        fstar_ = fstar_one(pstar, gs)
+        dfstar_ = dfstar_dp_one(pstar, gs)
         pstar = pstar - fstar_ / dfstar_
-        return pstar, pstar_prev, fstar(pstar, gas_state), i + 1
+        return pstar, pstar_prev, fstar_one(pstar, gs), i + 1
 
-    init = (p0, jnp.inf, fstar(p0, gas_state), 0)
+    init = (p0, jnp.inf, fstar_one(p0, gs), 0)
     pstar, _pstar_prev, fstar_final, _ = jax.lax.while_loop(cond, body, init)
     return pstar, fstar_final
 
 
 @jax.jit
-def _bisect(gas_state):
+def _bisect(gs: GasState):
     """Bisection solver for p*. Slow but guaranteed to converge.
 
     Vacuum states (no physical root) return a very small p* with a
     non-zero residual.
     """
-    p_guess = jnp.maximum(two_rarefaction_p0(gas_state), 1e-30)
+    p_guess = jnp.maximum(two_rarefaction_p0(gs), 1e-30)
 
     p_lo = p_guess * 0.5
     p_hi = p_guess * 2.0
-    f_lo = fstar(p_lo, gas_state)
-    f_hi = fstar(p_hi, gas_state)
+    f_lo = fstar_one(p_lo, gs)
+    f_hi = fstar_one(p_hi, gs)
 
     def widen_cond(state):
         _p_lo, _p_hi, _f_lo, _f_hi, i = state
@@ -154,7 +168,7 @@ def _bisect(gas_state):
         _p_hi = jnp.where(_f_hi < 0, _p_hi * 100.0, _p_hi)
         return (
             _p_lo, _p_hi,
-            fstar(_p_lo, gas_state), fstar(_p_hi, gas_state), i + 1,
+            fstar_one(_p_lo, gs), fstar_one(_p_hi, gs), i + 1,
         )
 
     p_lo, p_hi, f_lo, f_hi, _ = jax.lax.while_loop(
@@ -169,7 +183,7 @@ def _bisect(gas_state):
     def bisect_body(state):
         _p_lo, _p_hi, i = state
         p_mid = 0.5 * (_p_lo + _p_hi)
-        f_mid = fstar(p_mid, gas_state)
+        f_mid = fstar_one(p_mid, gs)
         _p_lo = jnp.where(f_mid < 0, p_mid, _p_lo)
         _p_hi = jnp.where(f_mid >= 0, p_mid, _p_hi)
         return _p_lo, _p_hi, i + 1
@@ -179,15 +193,15 @@ def _bisect(gas_state):
     )
 
     p_result = 0.5 * (p_lo + p_hi)
-    f_result = fstar(p_result, gas_state)
+    f_result = fstar_one(p_result, gs)
     return p_result, f_result
 
 
 @jax.jit
 def find_pstar(gs: GasState):
     """Find p* via Newton with bisection fallback; returns (pstar, residual)."""
-    p0 = jnp.maximum(two_rarefaction_p0(gs), 1e-30)
-    p_newton, f_newton = _newton(gas_state, p0)
+    
+    p_newton, f_newton = _newton(gs)
 
     newton_ok = (
         jnp.isfinite(p_newton)
@@ -199,7 +213,7 @@ def find_pstar(gs: GasState):
     p_bisect, f_bisect = jax.lax.cond(
         newton_ok,
         lambda _: (p_newton, f_newton),
-        lambda _: _bisect(gas_state),
+        lambda _: _bisect(gs),
         None,
     )
     return p_bisect, f_bisect
@@ -390,8 +404,9 @@ def compute_integrated_flux(t, gas_state, uL=0.0):
 
 
 if __name__ == "__main__":
-    gas_state = jnp.array([0.1, 0.1, 0.1])
-    pstar, f_star = find_pstar(gas_state)
+    # gas_state = jnp.array([0.1, 0.1, 0.1])
+    gs = GasState(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=0.3)
+    pstar, f_star = find_pstar(gs)
     print('pstar:', pstar)
     print('f_star:', f_star)
     print()
