@@ -38,7 +38,7 @@ from evaluate import (  # noqa: E402
 from physics import find_pstar, compute_flux, compute_integrated_flux, GAS_STATE_DIM, GasState
 
 # FLUX_SCALE = jnp.array([10.0, 1e3, 1e5])
-FLUX_SCALE = jnp.array([1.0, 1.0, 1.0])
+# FLUX_SCALE = jnp.array([1.0, 1.0, 1.0])
 
 
 def F_pred(F_net, x):
@@ -115,6 +115,19 @@ REGIME_LABELS = ("full", "restricted", "small_jump")
 METRIC_KEYS = metric_keys_for(REGIME_LABELS)
 
 
+def compute_flux_scale(bounds: jax.Array, batch_size: int = 2**20) -> jax.Array:
+    sampler = UniformRandomSampler()
+    x_batch = sampler.draw_batch(jr.PRNGKey(0), batch_size, GAS_STATE_DIM+1, bounds)
+    compute_flux_of_x = lambda x: compute_flux(x[0], GasState.from_array(x[1:]))
+    flux_eval = jax.vmap(compute_flux_of_x)(x_batch)
+    mean_of_squares = jnp.mean(flux_eval**2, axis=0)
+    
+    return jnp.sqrt(mean_of_squares)
+
+FLUX_SCALE = compute_flux_scale(TRAIN_BOUNDS)
+print('FLUX_SCALE:', FLUX_SCALE)
+
+
 def make_eval_regimes(key: jax.Array, batch_size: int) -> dict[str, jax.Array]:
     k_full, k_r, k_sj = jr.split(key, 3)
     return {
@@ -159,7 +172,8 @@ def loss(x: jax.Array, net, scale: float = 1.0) -> jax.Array:
     
     # return jnp.mean(jnp.log(jnp.abs(F_t_eval/flux_eval)))
     # return jnp.mean((jnp.log(F_t_eval) - jnp.log(flux_eval))**2)
-    # return jnp.mean((jnp.arcsinh(F_t_eval / scale) - jnp.arcsinh(flux_eval / scale)) ** 2)
+    
+    # return jnp.mean((jnp.arcsinh(F_t_eval / FLUX_SCALE) - jnp.arcsinh(flux_eval / FLUX_SCALE)) ** 2)
     
     return jnp.mean((F_t_eval - flux_eval) ** 2 / FLUX_SCALE**2)
     
