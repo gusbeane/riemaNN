@@ -1,5 +1,6 @@
-"""L2/Linf error evaluation against a known ground truth + sampling helpers
-for the evaluation regimes used by the Riemann integrated face-flux pipeline.
+"""Per-channel relative-error evaluation against a known ground truth + sampling
+helpers for the evaluation regimes used by the Riemann integrated face-flux
+pipeline.
 
 The error machinery (`errors_on`, `evaluate_all`) is physics-agnostic: the
 caller supplies
@@ -28,23 +29,20 @@ def errors_on(
     x_eval: jax.Array,
     F_pred_fn: Callable[..., jax.Array],
     F_true_fn: Callable[[jax.Array], jax.Array],
-) -> tuple[float, float]:
-    """Return (L2, Linf) error of `F_pred_fn(F_net, .)` against `F_true_fn` on `x_eval`."""
+) -> tuple[jax.Array, jax.Array]:
+    """Per-channel relative-error stats of `F_pred_fn(F_net, .)` vs `F_true_fn`.
+
+    The relative error is `|F_pred - F_true| / |F_true|`, reduced over the batch
+    axis. Returns `(median_rel_channels, max_rel_channels)`, each of shape
+    `(n_channels,)` = (mass, momentum, energy).
+    """
     F_pred = jax.vmap(lambda r: F_pred_fn(F_net, r))(x_eval)
     F_exact = jax.vmap(F_true_fn)(x_eval)
-    err = F_pred - F_exact
-    l2 = float(jnp.sqrt(jnp.mean(err**2)))
-    linf = float(jnp.max(jnp.abs(err)))
-    rel_l2 = l2 / jnp.sqrt(jnp.mean(F_exact**2))
+    rel = jnp.abs(F_pred - F_exact) / jnp.abs(F_exact)
 
-    # flat_idx = jnp.argmax(jnp.abs(err))
-    # idx = jnp.unravel_index(flat_idx, err.shape)
-    # max_err = err[idx]
-    # rel_linf = jnp.abs(max_err / F_exact[idx])
-
-    rel_linf = jnp.max(jnp.abs(err / F_exact))
-
-    return l2, linf, rel_l2, rel_linf
+    median_rel_channels = jnp.median(rel, axis=0)
+    max_rel_channels = jnp.max(rel, axis=0)
+    return median_rel_channels, max_rel_channels
 
 
 def evaluate_all(
@@ -55,19 +53,29 @@ def evaluate_all(
     regimes: Mapping[str, jax.Array],
 ) -> dict[str, float]:
     metrics: dict[str, float] = {}
+    channel_labels = ("mass_flux", "momentum_flux", "energy_flux")
     for label, x_eval in regimes.items():
-        l2, linf, rel_l2, rel_linf = errors_on(F_net, x_eval, F_pred_fn, F_true_fn)
-        metrics[f"l2_{label}"] = l2
-        metrics[f"linf_{label}"] = linf
-        metrics[f"rel_l2_{label}"] = rel_l2
-        metrics[f"rel_linf_{label}"] = rel_linf
+        median_rel_channels, max_rel_channels = errors_on(
+            F_net, x_eval, F_pred_fn, F_true_fn
+        )
+        for i, channel in enumerate(channel_labels):
+            metrics[f"median_rel_{label}_{channel}"] = float(median_rel_channels[i])
+            metrics[f"max_rel_{label}_{channel}"] = float(max_rel_channels[i])
     return metrics
+
+
+CHANNEL_LABELS = ("mass_flux", "momentum_flux", "energy_flux")
 
 
 def metric_keys_for(regime_labels) -> tuple[str, ...]:
     """Return the metric-key tuple produced by `evaluate_all` for these regimes,
-    matching the (l2, linf) per-regime order used internally."""
-    return tuple(f"{m}_{label}" for label in regime_labels for m in ("l2", "linf"))
+    matching the per-channel (median_rel, max_rel) order used internally."""
+    return tuple(
+        f"{m}_{label}_{channel}"
+        for label in regime_labels
+        for channel in CHANNEL_LABELS
+        for m in ("median_rel", "max_rel")
+    )
 
 
 # ---------------------------------------------------------------------------

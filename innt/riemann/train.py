@@ -140,24 +140,24 @@ def make_eval_regimes(key: jax.Array, batch_size: int) -> dict[str, jax.Array]:
 def print_metrics(m: Mapping[str, float]) -> None:
     """Riemann-flavored, human-friendly metric summary.
 
-    Errors are reduced over all (N, 3) entries; the 3-component flux mixes
-    mass, momentum, and energy, so the energy channel tends to dominate Linf.
+    For each regime, prints the per-channel (mass/momentum/energy) median and
+    max of the relative error |F_pred - F_true| / |F_true|.
     """
-    tqdm.write(
-        f"  full       (t<1.0, |drho|,|dp|<=1.0, du in [-2,1])  : "
-        f"L2={m['l2_full']:.3e} (rel={m['rel_l2_full']:.3e})  "
-        f"Linf={m['linf_full']:.3e} (rel={m['rel_linf_full']:.3e})"
+    channels = (
+        ("mass", "mass_flux"),
+        ("momentum", "momentum_flux"),
+        ("energy", "energy_flux"),
     )
-    tqdm.write(
-        f"  restricted (t<0.8, drho in [0,0.8], |dp|,|du|<=0.8) : "
-        f"L2={m['l2_restricted']:.3e} (rel={m['rel_l2_restricted']:.3e})  "
-        f"Linf={m['linf_restricted']:.3e} (rel={m['rel_linf_restricted']:.3e})"
-    )
-    tqdm.write(
-        f"  small jump (|drho|,|dp|,|du|<=1e-2)                 : "
-        f"L2={m['l2_small_jump']:.3e} (rel={m['rel_l2_small_jump']:.3e})  "
-        f"Linf={m['linf_small_jump']:.3e} (rel={m['rel_linf_small_jump']:.3e})"
-    )
+
+    for regime in REGIME_LABELS:
+        tqdm.write(f"  {regime}:")
+        for display_name, key_name in channels:
+            tqdm.write(
+                f"    {display_name:8s}: "
+                f"median |rel|={m[f'median_rel_{regime}_{key_name}']:.2e}  "
+                f"max |rel|={m[f'max_rel_{regime}_{key_name}']:.2e}"
+            )
+        tqdm.write("-" * 60)
 
 
 # ---------------------------------------------------------------------------
@@ -213,7 +213,7 @@ def train_adam(
     n_steps: int,
     step_offset: int = 0,
     flush_every: int = 100,
-    lr: float = 1e-4,
+    lr: float = 1e-3,
     batch_size: int = 100_000,
     seed: int = 0,
 ) -> None:
