@@ -40,24 +40,23 @@ from physics import find_pstar, compute_flux, compute_integrated_flux, GAS_STATE
 FLUX_SCALE = jnp.array([1e-5, 1e-3, 1e-5])
 
 def F_pred(F_net, x):
-    """Network's prediction of F(t, drho, dp, du) = t * F_net(t, drho, dp, du).
+    """Network's prediction of Flux / t.
 
-    Works for both single `x` (shape (4,)) and batched `x` (shape (N, 4)).
-    Output is a 3-vector flux (mass, momentum, energy) per sample.
+    Raw network predicts arcsinh(F/FLUX_SCALE)
     """
-    return x[..., 0:1] * F_net(x)
+    
+    net_out = F_net(x)
+    ans = FLUX_SCALE * jnp.sinh(net_out)
+    
+    return ans
 
 
 def F_true(x: jax.Array) -> jax.Array:
-    """Exact integrated face flux at a single eval point.
-
-    The star state at xi = 0 is t-invariant for the self-similar Riemann
-    problem, so F(t) = integral_0^t f(u*(0)) ds = t * f(u*(0)). That product
-    is exactly what `compute_flux` returns.
+    """Exact flux divided by t.
     """
     t = x[0]
     gs = GasState.from_array(x[1:])
-    return compute_integrated_flux(t, gs)
+    return compute_integrated_flux(t, gs) / t
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +150,7 @@ def print_metrics(m: Mapping[str, float]) -> None:
 # ---------------------------------------------------------------------------
 # Loss
 
-def loss(x: jax.Array, net, scale: float = 1.0) -> jax.Array:
+def loss_on_derivative(x: jax.Array, net) -> jax.Array:
     F = lambda r: r[..., 0] * net(r)
     F_t_eval = jax.vmap(jax.jacfwd(F))(x)[..., 0]
 
@@ -167,6 +166,44 @@ def loss(x: jax.Array, net, scale: float = 1.0) -> jax.Array:
     
     # err = (F_t_eval - flux_eval) / FLUX_SCALE
     # return jnp.mean(optax.huber_loss(err, delta=1.0))
+
+def loss_on_flux(x: jax.Array, net) -> jax.Array:
+    F = lambda r: r[..., 0] * net(r)
+    F_eval = jax.vmap(F)(x)
+
+    compute_integrated_flux_of_x = lambda x: compute_integrated_flux(x[0], GasState.from_array(x[1:]))
+    flux_true_eval = jax.vmap(compute_integrated_flux_of_x)(x)
+
+    # return jnp.mean((F_eval - flux_true_eval) ** 2 / FLUX_SCALE**2)
+    num = (F_eval - flux_true_eval) ** 2
+    den = (flux_true_eval)**2 + (1)**2
+
+    return jnp.mean(num / den)
+
+def loss_on_flux_arcsinh(x: jax.Array, net, lam_rel_err=0.0):
+    # this predicts arcsinh(F/FLUX_SCALE)
+    F_eval_arcsinh = net(x)
+
+    F_true_eval = jax.vmap(F_true)(x)
+    F_true_eval_arcsinh = jnp.arcsinh(F_true_eval / FLUX_SCALE)
+
+    mse = jnp.mean((F_eval_arcsinh - F_true_eval_arcsinh) ** 2)
+
+    rel = jnp.mean(((F_eval_arcsinh - F_true_eval_arcsinh)/(F_true_eval_arcsinh)) ** 2)
+
+    return mse + lam_rel_err * rel
+
+def loss_on_flux_arcsinh_transformed(x: jax.Array, net):
+    # this predicts arcsinh(F/FLUX_SCALE)
+    F_eval_arcsinh = net(x)
+    F_eval = FLUX_SCALE * jnp.sinh(F_eval_arcsinh)
+
+    F_true_eval = jax.vmap(F_true)(x)
+    # F_true_eval_arcsinh = jnp.arcsinh(F_true_eval / FLUX_SCALE)
+
+    return jnp.mean((F_eval - F_true_eval) ** 2)
+
+loss = loss_on_flux_arcsinh
 
 
 # ---------------------------------------------------------------------------
