@@ -10,6 +10,7 @@ this module.
 """
 
 from __future__ import annotations
+from termios import N_SLIP
 
 import jax
 
@@ -180,16 +181,21 @@ def loss_on_flux(x: jax.Array, net) -> jax.Array:
 
     return jnp.mean(num / den)
 
-def loss_on_flux_arcsinh(x: jax.Array, net, lam_rel_err=0.0):
+def loss_on_flux_arcsinh(x: jax.Array, net, lam_rel_err=0.0, rel_tol=1e-4):
+    F_true_eval = jax.vmap(F_true)(x)
+    targets = jnp.arcsinh(F_true_eval / FLUX_SCALE)
+
+    return loss_on_flux_arcsinh_precomputed(x, targets, net, lam_rel_err, rel_tol)
+
+
+def loss_on_flux_arcsinh_precomputed(x: jax.Array, targets, net, lam_rel_err=0.0, rel_tol=1e-4):
     # this predicts arcsinh(F/FLUX_SCALE)
     F_eval_arcsinh = net(x)
 
-    F_true_eval = jax.vmap(F_true)(x)
-    F_true_eval_arcsinh = jnp.arcsinh(F_true_eval / FLUX_SCALE)
+    
+    mse = jnp.mean((F_eval_arcsinh - targets) ** 2)
 
-    mse = jnp.mean((F_eval_arcsinh - F_true_eval_arcsinh) ** 2)
-
-    rel = jnp.mean(((F_eval_arcsinh - F_true_eval_arcsinh)/(F_true_eval_arcsinh)) ** 2)
+    rel = jnp.mean( (F_eval_arcsinh - targets)**2 / ((targets)**2 + (rel_tol)**2))
 
     return mse + lam_rel_err * rel
 
@@ -217,9 +223,9 @@ def _adam_step(F_net: MLP, opt: nnx.Optimizer, batch: jax.Array) -> jax.Array:
 
 
 @nnx.jit
-def _lbfgs_step(F_net: MLP, opt: nnx.Optimizer, x_batch: jax.Array) -> jax.Array:
+def _lbfgs_step(F_net: MLP, opt: nnx.Optimizer, x_batch: jax.Array, targets, lam_rel_err=0.0, rel_tol=1e-4) -> jax.Array:
     def loss_fn(m):
-        return loss(x_batch, m)
+        return loss_on_flux_arcsinh_precomputed(x_batch, targets, m, lam_rel_err, rel_tol)
 
     graphdef, _params, rest = nnx.split(F_net, nnx.Param, ...)
     loss_val, grads = nnx.value_and_grad(loss_fn)(F_net)
@@ -271,14 +277,19 @@ def train_lbfgs(
     flush_every: int = 100,
     batch_size: int = 2**17,
     batch_seed: int = 42,
+    lam_rel_err=0.0,
+    rel_tol=1e-4,
 ) -> None:
     sampler = UniformRandomSampler()
     x_batch = sampler.draw_batch(jr.PRNGKey(batch_seed), batch_size, GAS_STATE_DIM+1, TRAIN_BOUNDS)
     opt = nnx.Optimizer(F_net, optax.lbfgs(), wrt=nnx.Param)
 
+    F_true_eval = jax.vmap(F_true)(x_batch)
+    targets = jnp.arcsinh(F_true_eval / FLUX_SCALE)
+
     pbar = tqdm(range(1, n_steps + 1), desc="lbfgs")
     for i in pbar:
-        loss_val = _lbfgs_step(F_net, opt, x_batch)
+        loss_val = _lbfgs_step(F_net, opt, x_batch, targets, lam_rel_err, rel_tol)
         writer.record_loss(loss_val)
 
         global_step = step_offset + i
@@ -310,10 +321,19 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--adam-lr", type=float, default=1e-3)
     p.add_argument("--eval-seed", type=int, default=123)
     p.add_argument("--skip-lbfgs", action="store_true")
+    p.add_argument("--skip-adam", action="store_true")
+    p.add_argument("--load-from-ckpt", type=Path, default=None)
+    p.add_argument("--lam-rel-err", type=float, default=0.0)
+    p.add_argument("--rel-tol", type=float, default=1e-4)
     args = p.parse_args(argv)
 
     arch = {"in_dim": GAS_STATE_DIM+1, "width": 32, "depth": 3, "out_dim": 3}
-    F_net = init_nn(**arch, seed=args.seed)
+    N_steps = 0
+    if args.load_from_ckpt is not None:
+        F_net, N_ = load_latest(args.load_from_ckpt, _build_model)
+        N_steps += N_
+    else:
+        F_net = init_nn(**arch, seed=args.seed)
 
     eval_key = jr.PRNGKey(args.eval_seed)
 
@@ -331,26 +351,32 @@ def main(argv: list[str] | None = None) -> None:
         print_metrics_fn=print_metrics,
     )
 
-    train_adam(
-        F_net,
-        writer=writer,
-        n_steps=args.adam_steps,
-        batch_size=args.adam_batch_size,
-        step_offset=0,
-        flush_every=args.flush_every,
-        lr=args.adam_lr,
-    )
+    if not args.skip_adam:
+        train_adam(
+            F_net,
+            writer=writer,
+            n_steps=args.adam_steps,
+            batch_size=args.adam_batch_size,
+            step_offset=N_steps,
+            flush_every=args.flush_every,
+            lr=args.adam_lr,
+        )
+        N_steps += args.adam_steps
+
     if not args.skip_lbfgs:
         train_lbfgs(
             F_net,
             writer=writer,
             n_steps=args.lbfgs_steps,
             batch_size=args.lbfgs_batch_size,
-            step_offset=args.adam_steps,
+            step_offset=N_steps,
             flush_every=args.flush_every,
+            lam_rel_err=args.lam_rel_err,
+            rel_tol=args.rel_tol,
         )
+        N_steps += args.lbfgs_steps
 
-    reloaded = load_latest(args.ckpt_dir, _build_model)
+    reloaded, _ = load_latest(args.ckpt_dir, _build_model)
     x = jr.uniform(jr.PRNGKey(7), (8, arch["in_dim"]), minval=-0.5, maxval=0.5)
     if not jnp.allclose(F_net(x), reloaded(x)):
         raise AssertionError("checkpoint round-trip mismatch")

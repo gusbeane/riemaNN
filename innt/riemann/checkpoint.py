@@ -73,7 +73,9 @@ def load_latest(ckpt_dir: Path, build_model: Callable[[dict], nnx.Module]) -> nn
     files = sorted(ckpt_dir.glob("F_net_*.msgpack"))
     if not files:
         raise FileNotFoundError(f"no F_net_*.msgpack in {ckpt_dir}")
-    return load_model(files[-1], build_model)
+    print("loading latest checkpoint from", files[-1])
+    N_steps = int(files[-1].stem.split("_")[-1])
+    return load_model(files[-1], build_model), N_steps
 
 
 # ---------------------------------------------------------------------------
