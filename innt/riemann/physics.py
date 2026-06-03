@@ -26,37 +26,48 @@ ALPHA: float = (GAMMA - 1.0) / (2.0 * GAMMA)
 BETA: float = (GAMMA - 1.0) / (GAMMA + 1.0)
 MU: float = (GAMMA - 1.0) / 2.0
 
-GAS_STATE_DIM: int = 5
+GAS_STATE_DIM: int = 6
+
+def flux_from_primitive_state(rho: float, u: float, p: float):
+    E = p / (GAMMA - 1.0) + 0.5 * rho * u * u
+    return jnp.array([
+        rho * u,
+        rho * u**2 + p,
+        u * (E + p),
+    ])
 
 class GasState(NamedTuple):
     log10_rhoL: jax.Array
+    uL:         jax.Array
     log10_pL:   jax.Array
     log10_rhoR: jax.Array
     log10_pR:   jax.Array
-    uRL:        jax.Array
+    uR:        jax.Array
 
     @classmethod
     def from_array(cls, x):
         return cls(
             log10_rhoL=x[..., 0],
-            log10_pL=x[..., 1],
-            log10_rhoR=x[..., 2],
-            log10_pR=x[..., 3],
-            uRL=x[..., 4],
+            uL=x[...,1],
+            log10_pL=x[..., 2],
+            log10_rhoR=x[..., 3],
+            uR=x[..., 4],
+            log10_pR=x[..., 5],
         )
     
     @classmethod
-    def from_linear(cls, *, rhoL: float, pL: float, rhoR: float, pR: float, uRL: float):
+    def from_linear(cls, *, rhoL: float, uL: float, pL: float, rhoR: float, uR: float, pR: float):
         return cls(
             log10_rhoL=jnp.log10(rhoL),
+            uL=uL,
             log10_pL=jnp.log10(pL),
             log10_rhoR=jnp.log10(rhoR),
+            uR=uR,
             log10_pR=jnp.log10(pR),
-            uRL=uRL,
         )
    
     def as_array(self):
-        return jnp.stack([self.log10_rhoL, self.log10_pL, self.log10_rhoR, self.log10_pR, self.uRL], axis=-1)
+        return jnp.stack([self.log10_rhoL, self.uL, self.log10_pL, self.log10_rhoR, self.uR, self.log10_pR], axis=-1)
     
     @property
     def rhoL(self):
@@ -87,6 +98,10 @@ class GasState(NamedTuple):
         return (self.aL + self.aR) / MU
     
     @property
+    def uRL(self):
+        return self.uR - self.uL
+    
+    @property
     def is_vacuum(self):
         return self.uRL >= self.ucrit
     
@@ -98,7 +113,46 @@ class GasState(NamedTuple):
     
     def aK(self, LR: int):
         return jnp.where(LR == -1, self.aL, self.aR)
-   
+
+@jax.jit
+def abs_flux_jacobian_from_primitive_state(rho: float, u: float, p: float):
+    """Return |F'(U)| for the 1D Euler equations.
+
+    Conservative variable convention:
+        U = [rho, rho*u, E]
+
+    This computes
+        |A| = R @ abs(Lambda) @ inv(R)
+
+    where A = F'(U).
+    """
+
+    E = p / (GAMMA - 1.0) + 0.5 * rho * u * u
+    H = (E + p) / rho
+    a = jnp.sqrt(GAMMA * p / rho)
+
+    R = jnp.array([
+        [1.0,       1.0, 1.0],
+        [u - a,     u,   u + a],
+        [H - u*a, 0.5 * u * u, H + u*a],
+    ])
+
+    lam = jnp.array([u - a, u, u + a])
+
+    return R @ jnp.diag(jnp.abs(lam)) @ jnp.linalg.inv(R)
+
+@jax.jit
+def abs_flux_jacobian_from_conserved_state(U):
+    """Return |F'(U)| from U = [rho, rho*u, E]."""
+
+    rho = U[0]
+    mom = U[1]
+    E = U[2]
+
+    u = mom / rho
+    p = (GAMMA - 1.0) * (E - 0.5 * mom * u)
+
+    return abs_flux_jacobian_from_primitive_state(rho, u, p)
 
 @jax.jit
 def ftilde_one(p: float, gs: GasState, LR: int):
@@ -252,7 +306,7 @@ def find_pstar(gs: GasState):
 
 
 @jax.jit
-def sample_origin(gs: GasState, pstar: float, uL: float = 0.0):
+def sample_origin(gs: GasState, pstar: float):
     """Return rho, u, e at x=0, t>0.
 
     Velocities are in units of u_ref = sqrt(p_ref / rho_ref).
@@ -261,9 +315,7 @@ def sample_origin(gs: GasState, pstar: float, uL: float = 0.0):
     uL fixes the Galilean frame. If uL=0, then uR = du * ducrit.
     """
 
-    rhoL, pL, rhoR, pR, uRL = gs.rhoL, gs.pL, gs.rhoR, gs.pR, gs.uRL
-
-    uR = uRL + uL
+    rhoL, uL, pL, rhoR, uR, pR= gs.rhoL, gs.uL, gs.pL, gs.rhoR, gs.uR, gs.pR
 
     aL, aR = gs.aL, gs.aR
 
@@ -410,9 +462,9 @@ def sample_origin(gs: GasState, pstar: float, uL: float = 0.0):
         None,
     )
 
-def compute_flux(t, gas_state, uL=0.0):
+def compute_flux(t, gas_state):
     pstar, _fstar = find_pstar(gas_state)
-    rho, u, e = sample_origin(gas_state, pstar, uL)
+    rho, u, e = sample_origin(gas_state, pstar)
     p = (GAMMA - 1.0) * rho * e
     E = rho * e + 0.5 * rho * u**2
     flux = jnp.array([
@@ -423,77 +475,32 @@ def compute_flux(t, gas_state, uL=0.0):
     return flux
 
 
-def compute_integrated_flux(t, gas_state, uL=0.0):
-    flux = compute_flux(t, gas_state, uL)
+def compute_integrated_flux(t, gs: GasState):
+    flux = compute_flux(t, gs)
     return t * flux
 
 
 if __name__ == "__main__":
     # gas_state = jnp.array([0.1, 0.1, 0.1])
-    gs = GasState.from_linear(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=10.)
+    gs = GasState.from_linear(rhoL=1.0, uL=-5.0, pL=1.0, rhoR=0.4, uR=10.0, pR=1.0)
     pstar, f_star = find_pstar(gs)
     print('pstar:', pstar)
     print('f_star:', f_star)
     print()
     
-    gs = GasState.from_linear(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=0.3)
+    gs = GasState.from_linear(rhoL=1.0, uL=0.0, pL=1.0, rhoR=0.4, uR=0.3, pR=1.0)
     pstar, f_star = find_pstar(gs)
     print('pstar:', pstar)
     print('f_star:', f_star)
     print()
 
-    rho, u, e = sample_origin(gs, pstar, 0.0)
+    rho, u, e = sample_origin(gs, pstar)
     print('rho:', rho)
     print('u:', u)
     print('e:', e)
     print()
 
-    flux = compute_flux(1.0, gs, 0.0)
+    flux = compute_flux(1.0, gs)
     print('mass flux:', flux[0])
     print('momentum flux:', flux[1])
     print('energy flux:', flux[2])
-
-    print()
-    print("=== Known analytic solutions ===")
-
-    def check(label, gas_state, expected_pstar):
-        pstar, residual = find_pstar(gas_state)
-        err = float(jnp.abs(pstar - expected_pstar))
-        fstar = fstar_one(pstar, gas_state)
-        print(f"{label}:")
-        print(f"  gas_state = {gas_state}")
-        print(f"  pstar     = {pstar:.3e}")
-        # print(f"  |err|     = {err:.2e}, residual = {float(residual):.2e}")
-        print(f"  fstar     = {fstar:.3e}")
-
-    # 1. Trivial constant state: identical L/R, no waves => p* = 1.
-    check(
-        "constant state",
-        GasState.from_linear(rhoL=1.0, pL=1.0, rhoR=1.0, pR=1.0, uRL=0.0),
-        1.0,
-    )
-
-    # 2. Stationary contact discontinuity: pL = pR, uL = uR, only a density
-    #    jump. The Riemann fan is a single stationary contact => p* = 1.
-    check(
-        "stationary contact",
-        GasState.from_linear(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=0.0),
-        1.0,
-    )
-
-    # 3. Symmetric two-rarefaction (drho = dp = 0, du > 0). The jump function
-    #    collapses to (p^ALPHA - 1) + du = 0, giving p* = (1 - du)^(1/ALPHA).
-    du = 0.2
-    gs = GasState.from_linear(rhoL=1.0, pL=1.0, rhoR=0.4, pR=1.0, uRL=du)
-    check(
-        "symmetric two-rarefaction",
-        gs,
-        (1.0 - du) ** (1.0 / ALPHA),
-    )
-
-    # 4. Test 2 vacuum case from Toro Table 4.1.
-    check(
-        "vacuum case",
-        GasState.from_linear(rhoL=1.0, pL=0.4, rhoR=1.0, pR=0.4, uRL=4.),
-        0.00189,
-    )
