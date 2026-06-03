@@ -26,6 +26,7 @@ import jax.numpy as jnp
 import optax
 from jax import random as jr
 from tqdm import tqdm
+import jax.scipy.special as jsp
 
 # Make sibling modules importable when invoked as `python innt/burger/train.py`.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -121,7 +122,7 @@ def make_eval_regimes(key: jax.Array, batch_size: int) -> dict[str, jax.Array]:
     return {
         "full":       draw_rect(k_full, batch_size, FULL_BOUNDS),
         "restricted": draw_rect(k_r,    batch_size, RESTRICTED_BOUNDS),
-        "small_jump": draw_small_jumps(k_sj, batch_size),
+        "small_jump": draw_small_jumps(k_sj, batch_size, RESTRICTED_BOUNDS),
     }
 
 
@@ -181,23 +182,24 @@ def loss_on_flux(x: jax.Array, net) -> jax.Array:
 
     return jnp.mean(num / den)
 
-def loss_on_flux_arcsinh(x: jax.Array, net, lam_rel_err=0.0, rel_tol=1e-4):
+def loss_on_flux_arcsinh(x: jax.Array, net, weights, lam_rel_err=0.0, rel_tol=1e-4, beta=2.5, lam_beta=0.0):
     F_true_eval = jax.vmap(F_true)(x)
     targets = jnp.arcsinh(F_true_eval / FLUX_SCALE)
 
-    return loss_on_flux_arcsinh_precomputed(x, targets, net, lam_rel_err, rel_tol)
+    return loss_on_flux_arcsinh_precomputed(x, targets, net, weights, lam_rel_err, rel_tol, beta, lam_beta)
 
 
-def loss_on_flux_arcsinh_precomputed(x: jax.Array, targets, net, lam_rel_err=0.0, rel_tol=1e-4):
+def loss_on_flux_arcsinh_precomputed(x: jax.Array, targets, net, weights, lam_rel_err=0.0, rel_tol=1e-4, beta=2.5, lam_beta=0.0):
     # this predicts arcsinh(F/FLUX_SCALE)
     F_eval_arcsinh = net(x)
 
+    r = F_eval_arcsinh - targets
+    mse = jnp.mean(weights[..., None] * r ** 2)
+    rel = jnp.mean( r**2 / ((targets)**2 + (rel_tol)**2))
     
-    mse = jnp.mean((F_eval_arcsinh - targets) ** 2)
+    linf = (1.0/beta) * jsp.logsumexp(beta * jnp.abs(r))
 
-    rel = jnp.mean( (F_eval_arcsinh - targets)**2 / ((targets)**2 + (rel_tol)**2))
-
-    return mse + lam_rel_err * rel
+    return mse + lam_rel_err * rel + lam_beta * linf
 
 def loss_on_flux_arcsinh_transformed(x: jax.Array, net):
     # this predicts arcsinh(F/FLUX_SCALE)
@@ -217,15 +219,16 @@ loss = loss_on_flux_arcsinh
 
 @nnx.jit
 def _adam_step(F_net: MLP, opt: nnx.Optimizer, batch: jax.Array) -> jax.Array:
-    loss_val, grads = nnx.value_and_grad(lambda net: loss(batch, net))(F_net)
+    weights = jnp.ones_like(batch[..., 0])
+    loss_val, grads = nnx.value_and_grad(lambda net: loss(batch, net, weights))(F_net)
     opt.update(F_net, grads)
     return loss_val
 
 
 @nnx.jit
-def _lbfgs_step(F_net: MLP, opt: nnx.Optimizer, x_batch: jax.Array, targets, lam_rel_err=0.0, rel_tol=1e-4) -> jax.Array:
+def _lbfgs_step(F_net: MLP, opt: nnx.Optimizer, x_batch: jax.Array, targets, weights, lam_rel_err=0.0, rel_tol=1e-4, beta=2.5, lam_beta=0.0) -> jax.Array:
     def loss_fn(m):
-        return loss_on_flux_arcsinh_precomputed(x_batch, targets, m, lam_rel_err, rel_tol)
+        return loss_on_flux_arcsinh_precomputed(x_batch, targets, m, weights, lam_rel_err, rel_tol, beta, lam_beta)
 
     graphdef, _params, rest = nnx.split(F_net, nnx.Param, ...)
     loss_val, grads = nnx.value_and_grad(loss_fn)(F_net)
@@ -268,6 +271,11 @@ def train_adam(
         if i==0:
             pbar.reset(total=n_steps-1)
 
+def compute_weights(F_pred_eval: jax.Array, F_true_eval: jax.Array, q=0.5) -> jax.Array:
+    r = jnp.abs((F_pred_eval - F_true_eval) / (F_true_eval + 1e-2))
+    w = jnp.max(r, axis=1)**q
+    return w
+
 def train_lbfgs(
     F_net: MLP,
     *,
@@ -279,6 +287,10 @@ def train_lbfgs(
     batch_seed: int = 42,
     lam_rel_err=0.0,
     rel_tol=1e-4,
+    beta=2.5,
+    lam_beta=0.0,
+    reweight_after=None,
+    reweight_every=None,
 ) -> None:
     sampler = UniformRandomSampler()
     x_batch = sampler.draw_batch(jr.PRNGKey(batch_seed), batch_size, GAS_STATE_DIM+1, TRAIN_BOUNDS)
@@ -288,8 +300,14 @@ def train_lbfgs(
     targets = jnp.arcsinh(F_true_eval / FLUX_SCALE)
 
     pbar = tqdm(range(1, n_steps + 1), desc="lbfgs")
+    weights = jnp.ones_like(x_batch[..., 0])
     for i in pbar:
-        loss_val = _lbfgs_step(F_net, opt, x_batch, targets, lam_rel_err, rel_tol)
+        
+        if reweight_after is not None and i >= reweight_after and (i-reweight_after) % reweight_every == 0:
+            F_pred_eval = jax.vmap(lambda r: F_pred(F_net, r))(x_batch)
+            weights = compute_weights(F_pred_eval, F_true_eval)
+
+        loss_val = _lbfgs_step(F_net, opt, x_batch, targets, weights, lam_rel_err, rel_tol, beta, lam_beta)
         writer.record_loss(loss_val)
 
         global_step = step_offset + i
@@ -325,6 +343,10 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--load-from-ckpt", type=Path, default=None)
     p.add_argument("--lam-rel-err", type=float, default=0.0)
     p.add_argument("--rel-tol", type=float, default=1e-4)
+    p.add_argument("--beta", type=float, default=2.5)
+    p.add_argument("--lam-beta", type=float, default=0.0)
+    p.add_argument("--reweight-after", type=int, default=None)
+    p.add_argument("--reweight-every", type=int, default=None)
     args = p.parse_args(argv)
 
     arch = {"in_dim": GAS_STATE_DIM+1, "width": 32, "depth": 3, "out_dim": 3}
@@ -373,6 +395,10 @@ def main(argv: list[str] | None = None) -> None:
             flush_every=args.flush_every,
             lam_rel_err=args.lam_rel_err,
             rel_tol=args.rel_tol,
+            beta=args.beta,
+            lam_beta=args.lam_beta,
+            reweight_after=args.reweight_after,
+            reweight_every=args.reweight_every,
         )
         N_steps += args.lbfgs_steps
 
