@@ -38,7 +38,7 @@ def errors_on(
     """
     F_pred = jax.vmap(lambda r: F_pred_fn(F_net, r))(x_eval)
     F_exact = jax.vmap(F_true_fn)(x_eval)
-    rel = jnp.abs(F_pred - F_exact) / jnp.abs(F_exact)
+    rel = jnp.abs(F_pred - F_exact) / (jnp.abs(F_exact) + rel_tol)
 
     median_rel_channels = jnp.median(rel, axis=0)
     max_rel_channels = jnp.max(rel, axis=0)
