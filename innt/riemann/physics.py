@@ -454,11 +454,52 @@ def sample_origin(gs: GasState, pstar: float):
 
         return jax.lax.cond(is_shock, lambda _: shock_case(), lambda _: raref_case(), None)
 
-    # Contact speed separates left-star and right-star sides.
+    def sample_vacuum():
+        # Two rarefactions with a vacuum band in between; no contact / star
+        # states. Wave structure at xi: L | left fan | vacuum | right fan | R.
+        SHL = uL - aL                 # left rarefaction head
+        S_star_L = uL + aL / MU       # left vacuum front (fan tail)
+        S_star_R = uR - aR / MU       # right vacuum front (fan tail)
+        SHR = uR + aR                 # right rarefaction head
+
+        zero = jnp.zeros_like(rhoL)
+        vacuum_state = (zero, zero, zero)  # rho = p = 0 -> flux = 0
+
+        return jax.lax.cond(
+            xi <= SHL,
+            lambda _: (rhoL, uL, eL),
+            lambda _: jax.lax.cond(
+                xi <= S_star_L,
+                lambda __: left_fan_state(),
+                lambda __: jax.lax.cond(
+                    xi < S_star_R,
+                    lambda ___: vacuum_state,
+                    lambda ___: jax.lax.cond(
+                        xi <= SHR,
+                        lambda ____: right_fan_state(),
+                        lambda ____: (rhoR, uR, eR),
+                        None,
+                    ),
+                    None,
+                ),
+                None,
+            ),
+            None,
+        )
+
+    def sample_normal():
+        # Contact speed separates left-star and right-star sides.
+        return jax.lax.cond(
+            xi <= ustar,
+            lambda _: sample_left_of_contact(),
+            lambda _: sample_right_of_contact(),
+            None,
+        )
+
     return jax.lax.cond(
-        xi <= ustar,
-        lambda _: sample_left_of_contact(),
-        lambda _: sample_right_of_contact(),
+        gs.is_vacuum,
+        lambda _: sample_vacuum(),
+        lambda _: sample_normal(),
         None,
     )
 
