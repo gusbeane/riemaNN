@@ -173,7 +173,7 @@ def print_metrics(m: Mapping[str, float]) -> None:
                 f"median |rel|={m[f'median_rel_{regime}_{key_name}']:.2e}  "
                 f"max |rel|={m[f'max_rel_{regime}_{key_name}']:.2e}"
             )
-        for name in ["mse", "Dnorm"]:
+        for name in ["mse", "same_norm"]:
             tqdm.write(f"    {name:8s}: {m[f'loss_{name}_{regime}']:.2e}")
         tqdm.write("-" * 60)
 
@@ -181,10 +181,10 @@ def print_metrics(m: Mapping[str, float]) -> None:
 # ---------------------------------------------------------------------------
 # Loss
 
-def loss_on_flux_components(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_D: float) -> jax.Array:
-    flux_pred, D_pred = jax.vmap(lambda r: F_pred(net, r))(x)
+def loss_on_flux_components(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: float, lambda_same: float) -> jax.Array:
+    flux_pred, _D_pred = jax.vmap(lambda r: F_pred(net, r))(x)
 
-    Dnorm = jnp.mean(jnp.linalg.norm(D_pred, axis=(1,2))**2)
+    # used to have a term here for just norm of D
 
     # get sample where U_L=U_R where we copy U_L to U_R
     U_L = x[...,1:4]
@@ -193,32 +193,53 @@ def loss_on_flux_components(x: jax.Array, flux_true: jax.Array, net: MLP, lambda
     D_same_true = jax.vmap(abs_flux_jacobian_from_primitive_state)(10.0**U_L[..., 0], U_L[..., 1], 10.0**U_L[..., 2])
     D_same_norm = jnp.mean(jnp.linalg.norm(D_same_pred - D_same_true, axis=(1,2))**2)
 
-    names = ["mse", "Dnorm", "Dsame_norm"]
+    names = ["mse", "same_norm"]
 
-    # return jnp.array([jnp.mean((flux_pred - flux_true) ** 2), lambda_D * Dnorm, D_same_norm]), names
-    return jnp.array([0., 0., D_same_norm]), names
+    return jnp.array([lambda_mse * jnp.mean((flux_pred - flux_true) ** 2), lambda_same * D_same_norm]), names
 
-def loss_on_flux(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_D: float) -> jax.Array:
-    components, _names = loss_on_flux_components(x, flux_true, net, lambda_D)
+def loss_on_flux(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: float, lambda_same: float) -> jax.Array:
+    components, _names = loss_on_flux_components(x, flux_true, net, lambda_mse, lambda_same)
     return jnp.sum(components)
 
-loss = loss_on_flux
+def loss_on_rel_flux_components(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: float, lambda_same: float) -> jax.Array:
+    flux_pred, D_pred = jax.vmap(lambda r: F_pred(net, r))(x)
+
+    # used to have a term here for just norm of D
+
+    # get sample where U_L=U_R where we copy U_L to U_R
+    U_L = x[...,1:4]
+    x_same = jnp.concatenate([x[...,0:1], U_L, U_L], axis=-1)
+    D_same_pred = net(x_same).reshape(-1, 3, 3)
+    D_same_true = jax.vmap(abs_flux_jacobian_from_primitive_state)(10.0**U_L[..., 0], U_L[..., 1], 10.0**U_L[..., 2])
+    D_same_norm = jnp.mean(jnp.linalg.norm(D_same_pred - D_same_true, axis=(1,2))**2)
+
+    names = ["mse", "same_norm"]
+
+    mse = jnp.mean(jnp.abs(flux_pred - flux_true) ** 2 / (jnp.abs(flux_true) + 1e-2)**2)
+
+    return jnp.array([lambda_mse * mse, lambda_same * D_same_norm]), names
+
+def loss_on_rel_flux(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: float, lambda_same: float) -> jax.Array:
+    components, _names = loss_on_rel_flux_components(x, flux_true, net, lambda_mse, lambda_same)
+    return jnp.sum(components)
+
+loss = loss_on_rel_flux
 
 # ---------------------------------------------------------------------------
 # Training stages
 
 @nnx.jit
-def _adam_step(F_net: MLP, opt: nnx.Optimizer, batch: jax.Array, lambda_D: float) -> jax.Array:
+def _adam_step(F_net: MLP, opt: nnx.Optimizer, batch: jax.Array, lambda_mse: float, lambda_same: float) -> jax.Array:
     flux_true = jax.vmap(F_true)(batch)
-    loss_val, grads = nnx.value_and_grad(lambda net: loss(batch, flux_true, net, lambda_D))(F_net)
+    loss_val, grads = nnx.value_and_grad(lambda net: loss(batch, flux_true, net, lambda_mse, lambda_same))(F_net)
     opt.update(F_net, grads)
     return loss_val
 
 
 @nnx.jit
-def _lbfgs_step(F_net: MLP, opt: nnx.Optimizer, x_batch: jax.Array, flux_true, lambda_D: float) -> jax.Array:
+def _lbfgs_step(F_net: MLP, opt: nnx.Optimizer, x_batch: jax.Array, flux_true, lambda_mse: float, lambda_same: float) -> jax.Array:
     def loss_fn(m):
-        return loss_on_flux(x_batch, flux_true, m, lambda_D)
+        return loss(x_batch, flux_true, m, lambda_mse, lambda_same)
 
     graphdef, _params, rest = nnx.split(F_net, nnx.Param, ...)
     loss_val, grads = nnx.value_and_grad(loss_fn)(F_net)
@@ -240,7 +261,8 @@ def train_adam(
     lr: float = 1e-3,
     batch_size: int = 100_000,
     seed: int = 0,
-    lambda_D: float = 1e-2,
+    lambda_mse: float = 1e-2,
+    lambda_same: float = 1e-2,
 ) -> None:
     print('lr:', lr)
     opt = nnx.Optimizer(F_net, optax.adamw(lr), wrt=nnx.Param)
@@ -251,7 +273,7 @@ def train_adam(
     for i in pbar:
         subkey, key = jr.split(key)
         batch = sampler.draw_batch(subkey, batch_size, GAS_STATE_DIM+1, TRAIN_BOUNDS)
-        loss_val = _adam_step(F_net, opt, batch, lambda_D)
+        loss_val = _adam_step(F_net, opt, batch, lambda_mse, lambda_same)
         writer.record_loss(loss_val)
 
         global_step = step_offset + i
@@ -276,7 +298,8 @@ def train_lbfgs(
     flush_every: int = 100,
     batch_size: int = 2**17,
     batch_seed: int = 42,
-    lambda_D: float = 1e-2,
+    lambda_mse: float = 1e-2,
+    lambda_same: float = 1e-2,
 ) -> None:
     sampler = UniformRandomSampler()
     x_batch = sampler.draw_batch(jr.PRNGKey(batch_seed), batch_size, GAS_STATE_DIM+1, TRAIN_BOUNDS)
@@ -286,7 +309,7 @@ def train_lbfgs(
 
     pbar = tqdm(range(1, n_steps + 1), desc="lbfgs")
     for i in pbar:
-        loss_val = _lbfgs_step(F_net, opt, x_batch, flux_true, lambda_D)
+        loss_val = _lbfgs_step(F_net, opt, x_batch, flux_true, lambda_mse, lambda_same)
         writer.record_loss(loss_val)
 
         global_step = step_offset + i
@@ -320,7 +343,8 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--skip-lbfgs", action="store_true")
     p.add_argument("--skip-adam", action="store_true")
     p.add_argument("--load-from-ckpt", type=Path, default=None)
-    p.add_argument("--lambda-D", type=float, default=1e-2)
+    p.add_argument("--lambda-mse", type=float, default=1.)
+    p.add_argument("--lambda-same", type=float, default=0.)
     args = p.parse_args(argv)
 
     arch = {"in_dim": GAS_STATE_DIM+1, "width": 32, "depth": 3, "out_dim": 9}
@@ -336,7 +360,7 @@ def main(argv: list[str] | None = None) -> None:
     def evaluate_fn(net: nnx.Module) -> dict[str, float]:
         regimes = make_eval_regimes(eval_key, args.eval_batch_size)
         return evaluate_all(
-            net, F_pred_fn=F_pred_nomat, F_true_fn=F_true, regimes=regimes, lambda_D=args.lambda_D, loss_by_component=loss_on_flux_components
+            net, F_pred_fn=F_pred_nomat, F_true_fn=F_true, regimes=regimes, lambda_mse=args.lambda_mse, lambda_same=args.lambda_same, loss_by_component=loss_on_flux_components
         )
 
     writer = CheckpointWriter(
@@ -356,6 +380,8 @@ def main(argv: list[str] | None = None) -> None:
             step_offset=N_steps,
             flush_every=args.flush_every,
             lr=args.adam_lr,
+            lambda_mse=args.lambda_mse,
+            lambda_same=args.lambda_same,
         )
         N_steps += args.adam_steps
 
@@ -367,7 +393,8 @@ def main(argv: list[str] | None = None) -> None:
             batch_size=args.lbfgs_batch_size,
             step_offset=N_steps,
             flush_every=args.flush_every,
-            lambda_D=args.lambda_D,
+            lambda_mse=args.lambda_mse,
+            lambda_same=args.lambda_same,
         )
         N_steps += args.lbfgs_steps
 
