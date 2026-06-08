@@ -55,6 +55,7 @@ def evaluate_all(
     regimes: Mapping[str, jax.Array],
     lambda_mse: float,
     lambda_same: float,
+    lambda_asinh: float,
 ) -> dict[str, float]:
     metrics: dict[str, float] = {}
     channel_labels = ("mass_flux", "momentum_flux", "energy_flux")
@@ -67,7 +68,7 @@ def evaluate_all(
             metrics[f"max_rel_{label}_{channel}"] = float(max_rel_channels[i])
     
         flux_true = jax.vmap(F_true_fn)(x_eval)
-        loss_components, names = loss_by_component(x_eval, flux_true, F_net, lambda_mse, lambda_same)
+        loss_components, names = loss_by_component(x_eval, flux_true, F_net, lambda_mse, lambda_same, lambda_asinh)
         for i, name in enumerate(names):
             metrics[f"loss_{name}_{label}"] = float(loss_components[i])
 
