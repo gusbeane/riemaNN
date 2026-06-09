@@ -1,0 +1,3 @@
+todo:
+
+[ ] decide/fix t factor in flux (make consistent)
