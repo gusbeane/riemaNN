@@ -38,7 +38,23 @@ from evaluate import (  # noqa: E402
 )
 from physics import find_pstar, compute_flux, compute_integrated_flux, GAS_STATE_DIM, GasState, flux_from_primitive_state, GAMMA, abs_flux_jacobian_from_primitive_state
 
-FLUX_SCALE = jnp.array([1e-5, 1e-3, 1e-5])
+FLUX_SCALE_ARCSINH = jnp.array([1e-2, 1e-3, 2e-3])
+REL_EPS = 1e-3  # denominator floor in the relative-flux loss; diagnostics mirror it
+
+
+def flux_scale(x: jax.Array) -> jax.Array:
+    """Per-sample, per-channel characteristic Euler flux scale (mass, momentum, energy).
+
+    Built from the average state: mass ~ rho_c a_c, momentum ~ rho_c a_c^2 (~p_c),
+    energy ~ rho_c a_c^3. Used by the diagnostics (and, optionally, as a loss floor).
+    """
+    rhoL, pL = 10.0 ** x[..., 1], 10.0 ** x[..., 3]
+    rhoR, pR = 10.0 ** x[..., 4], 10.0 ** x[..., 6]
+    rho_c = 0.5 * (rhoL + rhoR)
+    p_c = 0.5 * (pL + pR)
+    a_c = jnp.sqrt(GAMMA * p_c / rho_c)
+    return jnp.stack([rho_c * a_c, rho_c * a_c ** 2, rho_c * a_c ** 3], axis=-1)
+
 
 def F_pred(F_net, x):
     """Network's prediction of Flux / t.
@@ -62,12 +78,30 @@ def F_pred(F_net, x):
     U_R = jnp.array([rhoR, rhoR * uR, ER])
     U_RL = U_R - U_L
 
+    # construct Roe reference states
+    sL, sR = jnp.sqrt(rhoL), jnp.sqrt(rhoR)
+    HL, HR = (EL + pL) / rhoL, (ER + pR) / rhoR
+    u_tilde = (sL * uL + sR * uR) / (sL + sR)
+    H_tilde = (sL * HL + sR * HR) / (sL + sR)
+    a2_tilde = (GAMMA - 1.0) * (H_tilde - 0.5 * u_tilde**2)
+    a_tilde = jnp.sqrt(a2_tilde)
+    rho_tilde = sL * sR
+    p_tilde = rho_tilde * a2_tilde / GAMMA
+
+    D_roe = abs_flux_jacobian_from_primitive_state(rho_tilde, u_tilde, p_tilde)
+
     # compute F_net and interpret as 3x3 matrix D, then apply to U_R - U_L
     net_out = F_net(x)  # shape (9,)
-    D = net_out.reshape(3, 3)
-    flux_D = D @ U_RL
 
-    return flux_LR - 0.5 * flux_D, D
+    D_pred = D_roe + a_tilde * net_out.reshape(3, 3)
+
+    # D = net_out.reshape(3, 3)
+    flux_D = D_pred @ U_RL
+
+    # flux_pred = jnp.sinh(flux_LR - 0.5 * flux_D) * FLUX_SCALE_ARCSINH
+    flux_pred = flux_LR - 0.5 * flux_D
+   
+    return flux_pred, D_pred
 
 def F_pred_nomat(F_net, x):
     return F_pred(F_net, x)[0]
@@ -102,7 +136,9 @@ class MLP(nnx.Module):
 def init_nn(in_dim: int, width: int = 32, depth: int = 3, out_dim: int = 9, *, seed: int = 0) -> MLP:
     assert out_dim == 9, "out_dim must be 9"
     dims = [in_dim] + [width] * depth + [out_dim]
-    return MLP(dims, rngs=nnx.Rngs(seed))
+    net = MLP(dims, rngs=nnx.Rngs(seed))
+    net.layers[-1].kernel[...] = jnp.zeros_like(net.layers[-1].kernel[...])
+    return net
 
 
 def _build_model(arch: dict) -> MLP:
@@ -113,21 +149,24 @@ def _build_model(arch: dict) -> MLP:
 # ---------------------------------------------------------------------------
 # Sampler + training/eval bounds
 
-# (t, drho, dp, du)
-# TRAIN_BOUNDS      = jnp.array([[0., 1.0], [-0.8, 0.8], [-0.8, 0.8], [-1.0, 0.4]])
-# FULL_BOUNDS       = jnp.array([[0., 1.0], [-0.8, 0.8], [-0.8, 0.8], [-1.0, 0.4]])
-# RESTRICTED_BOUNDS = jnp.array([[0., 0.8], [-0.6, 0.6], [-0.6, 0.6], [-0.8, 0.3]])
-
 # (t, 
 # log10_rhoL, uL log10_pL, 
 # log10_rhoR, uR, log10_pR)
+# TRAIN_BOUNDS      = jnp.array([[0., 1.0], 
+#                                [-0.2, 0.2], [-0.1, 0.1], [-0.2, 0.2], 
+#                                [-0.2, 0.2], [-0.1, 0.1], [-0.2, 0.2]])
+# FULL_BOUNDS = TRAIN_BOUNDS
+# RESTRICTED_BOUNDS = jnp.array([[0., 0.8], 
+#                                 [-0.1, 0.1], [-0.05, 0.05], [-0.1, 0.1], 
+#                                 [-0.1, 0.1], [-0.1, 0.1], [-0.05, 0.05]])
+
 TRAIN_BOUNDS      = jnp.array([[0., 1.0], 
-                               [-0.2, 0.2], [-0.1, 0.1], [-0.2, 0.2], 
-                               [-0.2, 0.2], [-0.1, 0.1], [-0.2, 0.2]])
+                               [-2. ,2.], [-1. ,1.], [-2. ,2.], 
+                               [-2. ,2.], [-1. ,1.], [-2. ,2.]])
 FULL_BOUNDS = TRAIN_BOUNDS
-RESTRICTED_BOUNDS = jnp.array([[0.2, 0.8], 
-                                [-0.1, 0.1], [-0.05, 0.05], [-0.1, 0.1], 
-                                [-0.1, 0.1], [-0.1, 0.1], [-0.05, 0.05]])
+RESTRICTED_BOUNDS = jnp.array([[0., 0.8], 
+                                [-1.5, 1.5], [-0.8, 0.8], [-1.5, 1.5], 
+                                [-1.5, 1.5], [-0.8, 0.8], [-1.5, 1.5]])
 
 
 class UniformRandomSampler:
@@ -140,7 +179,17 @@ class UniformRandomSampler:
 
 
 REGIME_LABELS = ("full", "restricted", "small_jump")
-METRIC_KEYS = metric_keys_for(REGIME_LABELS)
+
+# Diagnostic keys (per regime): loss concentration + zero-crossing tells.
+DIAG_NAMES = (
+    "top01_mass", "top01_momentum", "top01_energy",            # top-0.1% share of channel loss
+    "worst1_ratio_mass", "worst1_ratio_momentum", "worst1_ratio_energy",  # median |F|/S of worst 1%
+    "worst1_uabs", "all_uabs",                                  # |u_avg|: worst 1% vs all
+)
+
+METRIC_KEYS = metric_keys_for(REGIME_LABELS) + tuple(
+    f"diag_{name}_{label}" for label in REGIME_LABELS for name in DIAG_NAMES
+)
 
 
 
@@ -175,6 +224,17 @@ def print_metrics(m: Mapping[str, float]) -> None:
             )
         for name in ["mse", "same_norm"]:
             tqdm.write(f"    {name:8s}: {m[f'loss_{name}_{regime}']:.2e}")
+        tqdm.write("    diagnostics (current loss):")
+        for display_name, ch in (("mass", "mass"), ("momentum", "momentum"), ("energy", "energy")):
+            tqdm.write(
+                f"      {display_name:8s}: "
+                f"top0.1%-loss={m[f'diag_top01_{ch}_{regime}']:.2f}  "
+                f"worst1%_|F|/S={m[f'diag_worst1_ratio_{ch}_{regime}']:.2e}"
+            )
+        tqdm.write(
+            f"      u@worst1%: |u|med={m[f'diag_worst1_uabs_{regime}']:.2e}  "
+            f"(all={m[f'diag_all_uabs_{regime}']:.2e})"
+        )
         tqdm.write("-" * 60)
 
 
@@ -224,7 +284,8 @@ def loss_on_rel_flux_components(x: jax.Array, flux_true: jax.Array, net: MLP, la
 
     names = ["mse", "asinh_mse", "same_norm"]
 
-    mse = jnp.mean(jnp.abs(flux_pred - flux_true) ** 2 / (jnp.abs(flux_true) + REL_EPS)**2)
+    # mse = jnp.mean(jnp.abs(flux_pred - flux_true) ** 2 / (jnp.abs(flux_true) + REL_EPS)**2)
+    mse = jnp.mean(jnp.abs(flux_pred - flux_true) ** 2 / (flux_scale(x))**2)
 
     asinh_flux_true = jnp.arcsinh(flux_true / FLUX_SCALE_ARCSINH)
     asinh_flux_pred = jnp.arcsinh(flux_pred / FLUX_SCALE_ARCSINH)
@@ -237,6 +298,50 @@ def loss_on_rel_flux(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: f
     return jnp.sum(components)
 
 loss = loss_on_rel_flux
+
+
+def diagnostics(F_net: MLP, x: jax.Array) -> dict[str, float]:
+    """Loss-concentration and zero-crossing diagnostics for one eval batch.
+
+    Uses the *current* relative-MSE denominator (|F_true| + REL_EPS), so it
+    characterizes the loss actually being optimized. For each channel reports:
+      - top0.1% : fraction of that channel's total loss carried by its worst
+                  0.1% of samples. Near 1 => a few points dominate the loss.
+      - worst1%_|F|/S : median |F_true|/S over the channel's worst 1% of
+                  samples. << 1 => the worst points are near-zero-flux
+                  (zero-crossings), i.e. unfittable in relative error.
+    Plus |u_avg| (median) over the worst 1% by total loss vs all samples; a
+    much smaller worst-value implicates u~0 zero-crossings.
+    """
+    flux_pred = jax.vmap(lambda r: F_pred_nomat(F_net, r))(x)
+    flux_true = jax.vmap(F_true)(x)
+    S = flux_scale(x)
+
+    contrib = (flux_pred - flux_true) ** 2 / (jnp.abs(flux_true) + REL_EPS) ** 2  # (N,3)
+    ratio = jnp.abs(flux_true) / S                                               # (N,3)
+    u_abs = jnp.abs(0.5 * (x[..., 2] + x[..., 5]))                               # (N,)
+
+    n = contrib.shape[0]
+    k01 = max(1, n // 1000)
+    k1 = max(1, n // 100)
+
+    def top_share(c):
+        return jnp.sort(c)[-k01:].sum() / c.sum()
+
+    def worst_ratio(c, r):
+        return jnp.median(r[jnp.argsort(c)[-k1:]])
+
+    worst_idx = jnp.argsort(contrib.sum(axis=1))[-k1:]
+
+    channels = ("mass", "momentum", "energy")
+    out: dict[str, float] = {}
+    for i, ch in enumerate(channels):
+        out[f"top01_{ch}"] = float(top_share(contrib[:, i]))
+        out[f"worst1_ratio_{ch}"] = float(worst_ratio(contrib[:, i], ratio[:, i]))
+    out["worst1_uabs"] = float(jnp.median(u_abs[worst_idx]))
+    out["all_uabs"] = float(jnp.median(u_abs))
+    return out
+
 
 # ---------------------------------------------------------------------------
 # Training stages
@@ -378,6 +483,10 @@ def main(argv: list[str] | None = None) -> None:
         metrics = evaluate_all(
             net, F_pred_fn=F_pred_nomat, F_true_fn=F_true, regimes=regimes, lambda_mse=args.lambda_mse, lambda_same=args.lambda_same, lambda_asinh=args.lambda_asinh, loss_by_component=loss_on_flux_components
         )
+        for label, x_eval in regimes.items():
+            for name, val in diagnostics(net, x_eval).items():
+                metrics[f"diag_{name}_{label}"] = val
+        return metrics
 
     writer = CheckpointWriter(
         args.ckpt_dir,
