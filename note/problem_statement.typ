@@ -44,6 +44,10 @@ $ overline(bold(U))_i (t_(j+1)) = overline(bold(U))_i (t_j) - 1/(Delta x) integr
 
 And so the problem of computing a cell's values at the next timestep is reduced to computing the integral of the fluxes at its interfaces over the timestep. Note that we haven't actually done any numerics yet --- this form of Euler's equations is valid for the true solution.
 
+This can also be written as:
+
+$ cal(F)(t) = integral_0^t bold(F)(bold(U)(0, t')) dif t' thin. $
+
 == Godunov's Method
 
 === Setup
