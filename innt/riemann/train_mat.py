@@ -308,7 +308,7 @@ loss = loss_on_rel_flux
 def diagnostics(F_net: MLP, x: jax.Array) -> dict[str, float]:
     """Loss-concentration and zero-crossing diagnostics for one eval batch.
 
-    Uses the *current* relative-MSE denominator (|F_true| + REL_EPS), so it
+    Uses the flux_scale(x) denominator that the training loss optimizes, so it
     characterizes the loss actually being optimized. For each channel reports:
       - top0.1% : fraction of that channel's total loss carried by its worst
                   0.1% of samples. Near 1 => a few points dominate the loss.
@@ -322,7 +322,7 @@ def diagnostics(F_net: MLP, x: jax.Array) -> dict[str, float]:
     flux_true = jax.vmap(F_true)(x)
     S = flux_scale(x)
 
-    contrib = (flux_pred - flux_true) ** 2 / (jnp.abs(flux_true) + REL_EPS) ** 2  # (N,3)
+    contrib = (flux_pred - flux_true) ** 2 / S ** 2                              # (N,3)
     ratio = jnp.abs(flux_true) / S                                               # (N,3)
     u_abs = jnp.abs(0.5 * (x[..., 2] + x[..., 5]))                               # (N,)
 
@@ -389,7 +389,15 @@ def train_adam(
     lambda_asinh: float = 1e-2,
 ) -> None:
     print('lr:', lr)
-    opt = nnx.Optimizer(F_net, optax.adamw(lr), wrt=nnx.Param)
+    # Add gradient clipping with max_norm=1 to the optimizer
+    opt = nnx.Optimizer(
+        F_net,
+        optax.chain(
+            optax.clip_by_global_norm(1),
+            optax.adamw(lr)
+        ),
+        wrt=nnx.Param
+    )
     sampler = UniformRandomSampler()
     key = jr.PRNGKey(seed)
 
