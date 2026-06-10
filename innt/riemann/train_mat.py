@@ -94,13 +94,17 @@ def F_pred(F_net, x):
     # compute F_net and interpret as 3x3 matrix D, then apply to U_R - U_L
     net_out = F_net(x)  # shape (9,)
 
-    D_pred = D_roe + a_tilde * net_out.reshape(3, 3)
+    # D_pred = D_roe + a_tilde * net_out.reshape(3, 3)
+    D_pred = net_out.reshape(3, 3)
 
     # D = net_out.reshape(3, 3)
     flux_D = D_pred @ U_RL
 
     # flux_pred = jnp.sinh(flux_LR - 0.5 * flux_D) * FLUX_SCALE_ARCSINH
-    flux_pred = flux_LR - 0.5 * flux_D
+    flux_pred_raw = flux_LR - 0.5 * flux_D
+
+    # flux_pred = flux_pred_raw.at[..., 1].set(10.0 ** flux_pred_raw[..., 1])
+    flux_pred = flux_pred_raw
    
     return flux_pred, D_pred
 
