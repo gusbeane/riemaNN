@@ -48,12 +48,13 @@ def flux_scale(x: jax.Array) -> jax.Array:
     Built from the average state: mass ~ rho_c a_c, momentum ~ rho_c a_c^2 (~p_c),
     energy ~ rho_c a_c^3. Used by the diagnostics (and, optionally, as a loss floor).
     """
-    rhoL, pL = 10.0 ** x[..., 1], 10.0 ** x[..., 3]
-    rhoR, pR = 10.0 ** x[..., 4], 10.0 ** x[..., 6]
+    rhoL, uL, pL = 10.0 ** x[..., 1], x[..., 2], 10.0 ** x[..., 3]
+    rhoR, uR, pR = 10.0 ** x[..., 4], x[..., 5], 10.0 ** x[..., 6]
     rho_c = 0.5 * (rhoL + rhoR)
     p_c = 0.5 * (pL + pR)
     a_c = jnp.sqrt(GAMMA * p_c / rho_c)
-    return jnp.stack([rho_c * a_c, rho_c * a_c ** 2, rho_c * a_c ** 3], axis=-1)
+    v_c = a_c + jnp.maximum(jnp.abs(uL), jnp.abs(uR))
+    return jnp.stack([rho_c * v_c, rho_c * v_c ** 2, rho_c * v_c ** 3], axis=-1)
 
 
 def F_pred(F_net, x):
