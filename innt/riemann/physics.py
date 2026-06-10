@@ -41,8 +41,8 @@ class GasState(NamedTuple):
     uL:         jax.Array
     log10_pL:   jax.Array
     log10_rhoR: jax.Array
+    uR:         jax.Array
     log10_pR:   jax.Array
-    uR:        jax.Array
 
     @classmethod
     def from_array(cls, x):
