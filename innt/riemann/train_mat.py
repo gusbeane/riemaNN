@@ -39,7 +39,7 @@ from evaluate import (  # noqa: E402
 from physics import find_pstar, compute_flux, compute_integrated_flux, GAS_STATE_DIM, GasState, flux_from_primitive_state, GAMMA, abs_flux_jacobian_from_primitive_state
 
 FLUX_SCALE_ARCSINH = jnp.array([1e-2, 1e-3, 2e-3])
-REL_EPS = 1e-3  # denominator floor in the relative-flux loss; diagnostics mirror it
+REL_EPS = jnp.array([10, 5, 50])
 
 
 def flux_scale(x: jax.Array) -> jax.Array:
@@ -476,9 +476,9 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--skip-lbfgs", action="store_true")
     p.add_argument("--skip-adam", action="store_true")
     p.add_argument("--load-from-ckpt", type=Path, default=None)
-    p.add_argument("--lambda-mse", type=float, default=0.)
+    p.add_argument("--lambda-mse", type=float, default=1.)
     p.add_argument("--lambda-same", type=float, default=0.)
-    p.add_argument("--lambda-asinh", type=float, default=1.)
+    p.add_argument("--lambda-asinh", type=float, default=0.)
     args = p.parse_args(argv)
 
     arch = {"in_dim": GAS_STATE_DIM+1, "width": 32, "depth": 3, "out_dim": 9}
@@ -488,6 +488,7 @@ def main(argv: list[str] | None = None) -> None:
         N_steps += N_
     else:
         F_net = init_nn(**arch, seed=args.seed)
+        print('F_net eval:', F_net(jnp.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5])))
 
     eval_key = jr.PRNGKey(args.eval_seed)
 
