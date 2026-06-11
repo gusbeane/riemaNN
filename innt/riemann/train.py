@@ -145,11 +145,11 @@ def _build_model(arch: dict, *, seed: int = 0) -> MLP:
 # Samplers + training/eval bounds
 
 # (log10_rhoL, uL, log10_pL, log10_rhoR, uR, log10_pR)
-TRAIN_BOUNDS      = jnp.array([[-2., 2.], [-1., 1.], [-2., 2.],
-                               [-2., 2.], [-1., 1.], [-2., 2.]])
+TRAIN_BOUNDS      = jnp.array([[-1., 1.], [-1., 1.], [-1., 1.],
+                               [-1., 1.], [-1., 1.], [-1., 1.]])
 FULL_BOUNDS = TRAIN_BOUNDS
-RESTRICTED_BOUNDS = jnp.array([[-1.5, 1.5], [-0.8, 0.8], [-1.5, 1.5],
-                               [-1.5, 1.5], [-0.8, 0.8], [-1.5, 1.5]])
+RESTRICTED_BOUNDS = jnp.array([[-0.8, 0.8], [-0.8, 0.8], [-0.8, 0.8],
+                               [-0.8, 0.8], [-0.8, 0.8], [-0.8, 0.8]])
 
 
 class UniformRandomSampler:
