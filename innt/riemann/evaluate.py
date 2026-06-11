@@ -11,13 +11,13 @@ caller supplies
                                    evaluation points of shape `(N, dim)`.
 
 The sampling helpers (`draw_rect`, `draw_small_jumps`) encode the Riemann
-`(t, drho, dp, du)` regimes used to build that dict.
+`(log10_rhoL, uL, log10_pL, log10_rhoR, uR, log10_pR)` regimes used to build
+that dict.
 """
 
 from __future__ import annotations
 
 from typing import Callable, Mapping
-from physics import GasState
 
 import jax
 import jax.numpy as jnp
@@ -55,26 +55,16 @@ def evaluate_all(
     *,
     F_pred_fn: Callable[..., jax.Array],
     F_true_fn: Callable[[jax.Array], jax.Array],
-    loss_by_component: Callable,
     regimes: Mapping[str, jax.Array],
-    lambda_mse: float,
-    lambda_same: float,
-    lambda_asinh: float,
 ) -> dict[str, float]:
     metrics: dict[str, float] = {}
-    channel_labels = ("mass_flux", "momentum_flux", "energy_flux")
     for label, x_eval in regimes.items():
         median_rel_channels, max_rel_channels = errors_on(
             F_net, x_eval, F_pred_fn, F_true_fn
         )
-        for i, channel in enumerate(channel_labels):
+        for i, channel in enumerate(CHANNEL_LABELS):
             metrics[f"median_rel_{label}_{channel}"] = float(median_rel_channels[i])
             metrics[f"max_rel_{label}_{channel}"] = float(max_rel_channels[i])
-    
-        flux_true = jax.vmap(F_true_fn)(x_eval)
-        loss_components, names = loss_by_component(x_eval, flux_true, F_net, lambda_mse, lambda_same, lambda_asinh)
-        for i, name in enumerate(names):
-            metrics[f"loss_{name}_{label}"] = float(loss_components[i])
 
     return metrics
 
@@ -113,41 +103,30 @@ def draw_small_jumps(
     bounds: jax.Array,
     *,
     jump_max_rel: float = 1e-3,
-    t_max: float = 1.0,
 ) -> jax.Array:
-    """Batch of `(t, drho, dp, du)` with `|drho|, |dp|, |du| <= jump_max`.
+    """Batch of states whose R components are relative jumps of at most
+    `jump_max_rel` off the L components.
 
     Near-constant-state regime: small perturbations of a uniform fluid where
     the exact Riemann fan reduces to linear acoustics. Useful for checking
     the network in the weak-jump limit, which the full uniform sampler covers
     with vanishing probability.
     """
-    k_t, k_j, k_r = jr.split(key, 3)
-    t = jr.uniform(k_t, (batch_size,), minval=0.0, maxval=t_max)
-    # For each sample, first draw log10_rhoL, log10_pL, uRL uniformly from restricted bounds.
-    # Then, for each, draw an 'r' in [-jump_max_rel, jump_max_rel] for the ratio, and compute R as L * (1 + r).
-
-    # Pull L component values from the restricted domain
-    # indexes: [1]=log10_rhoL, [2]=uL, [3]=log10_pL(as in train.py)
-    l_lo = bounds[[1,2,3], 0]
-    l_hi = bounds[[1,2,3], 1]
-    # Sample log10_rhoL, log10_pL, and uRL
+    k_j, k_r = jr.split(key, 2)
+    # Draw the L state (log10_rhoL, uL, log10_pL) from the first three bounds
+    # rows, then a relative jump r in [-jump_max_rel, jump_max_rel] per
+    # component and set R = L * (1 + r) in linear variables.
+    l_lo = bounds[[0, 1, 2], 0]
+    l_hi = bounds[[0, 1, 2], 1]
     u_L = jr.uniform(k_j, (batch_size, 3), minval=0.0, maxval=1.0)
     L_vals = l_lo + (l_hi - l_lo) * u_L  # shape (batch_size, 3)
 
-    # Convert only columns 0 and 2 to linear (base 10)
+    # Convert the log columns (rho, p) to linear before applying the jump.
     L_vals_lin = L_vals.at[:, [0, 2]].set(10.0 ** L_vals[:, [0, 2]])
 
-    # For each, sample r in [-jump_max_rel, jump_max_rel]
     r = jr.uniform(k_r, (batch_size, 3), minval=-jump_max_rel, maxval=jump_max_rel)
 
-    # Compute right state values in delta terms.
     R_vals_lin = L_vals_lin * (1.0 + r)
     R_vals = R_vals_lin.at[:, [0, 2]].set(jnp.log10(R_vals_lin[:, [0, 2]]))
 
-    out = jnp.stack(
-        [t, L_vals[:, 0], L_vals[:, 1], L_vals[:, 2], R_vals[:, 0], R_vals[:, 1], R_vals[:, 2]],
-        axis=-1,
-    )
-
-    return out
+    return jnp.concatenate([L_vals, R_vals], axis=-1)
