@@ -16,6 +16,8 @@ So c_ref**2 = p_ref / rho_ref.
 
 from __future__ import annotations
 
+import functools
+
 import jax
 jax.config.update('jax_enable_x64', True)
 import jax.numpy as jnp
@@ -25,6 +27,26 @@ GAMMA: float = 5.0 / 3.0
 ALPHA: float = (GAMMA - 1.0) / (2.0 * GAMMA)
 BETA: float = (GAMMA - 1.0) / (GAMMA + 1.0)
 MU: float = (GAMMA - 1.0) / 2.0
+
+# Region codes returned by sample_origin(..., return_region=True): which
+# piece of the self-similar wave structure the sampled state belongs to.
+REGION_LEFT: int = 0        # unperturbed left state L
+REGION_RIGHT: int = 1       # unperturbed right state R
+REGION_LEFT_STAR: int = 2   # left star state L*
+REGION_RIGHT_STAR: int = 3  # right star state R*
+REGION_LEFT_FAN: int = 4    # inside the left rarefaction fan
+REGION_RIGHT_FAN: int = 5   # inside the right rarefaction fan
+REGION_VACUUM: int = 6      # vacuum band between two rarefactions
+
+REGION_NAMES: dict[int, str] = {
+    REGION_LEFT: "left",
+    REGION_RIGHT: "right",
+    REGION_LEFT_STAR: "left_star",
+    REGION_RIGHT_STAR: "right_star",
+    REGION_LEFT_FAN: "left_fan",
+    REGION_RIGHT_FAN: "right_fan",
+    REGION_VACUUM: "vacuum",
+}
 
 GAS_STATE_DIM: int = 6
 rhoL_idx, uL_idx, pL_idx, rhoR_idx, uR_idx, pR_idx = 0, 1, 2, 3, 4, 5
@@ -306,14 +328,18 @@ def find_pstar(gs: GasState):
     return pstar, fresid
 
 
-@jax.jit
-def sample_origin(gs: GasState, pstar: float):
+@functools.partial(jax.jit, static_argnames="return_region")
+def sample_origin(gs: GasState, pstar: float, return_region: bool = False):
     """Return rho, u, e at x=0, t>0.
 
     Velocities are in units of u_ref = sqrt(p_ref / rho_ref).
     Pressure and density use p_ref = rho_ref = 1 normalization.
 
     uL fixes the Galilean frame. If uL=0, then uR = du * ducrit.
+
+    If ``return_region`` is True, also return an integer region code naming
+    which piece of the self-similar wave structure was sampled (one of the
+    ``REGION_*`` constants; see ``REGION_NAMES`` for human-readable labels).
     """
 
     rhoL, uL, pL, rhoR, uR, pR= gs.rhoL, gs.uL, gs.pL, gs.rhoR, gs.uR, gs.pR
@@ -328,6 +354,9 @@ def sample_origin(gs: GasState, pstar: float):
     ustar = 0.5 * (ustar_L + ustar_R)
 
     xi = 0.0
+
+    def region(code):
+        return jnp.asarray(code, dtype=jnp.int32)
 
     def star_density(rhoK, pK):
         pratio = pstar / pK
@@ -345,6 +374,12 @@ def sample_origin(gs: GasState, pstar: float):
     eL_star = pstar / ((GAMMA - 1.0) * rhoL_star)
     eR_star = pstar / ((GAMMA - 1.0) * rhoR_star)
 
+    # Each (rho, u, e, region) tuple tags the sampled state with its region.
+    state_L = (rhoL, uL, eL, region(REGION_LEFT))
+    state_R = (rhoR, uR, eR, region(REGION_RIGHT))
+    state_L_star = (rhoL_star, ustar, eL_star, region(REGION_LEFT_STAR))
+    state_R_star = (rhoR_star, ustar, eR_star, region(REGION_RIGHT_STAR))
+
     def left_fan_state():
         # Left rarefaction fan state at xi = 0.
         u = (2.0 / (GAMMA + 1.0)) * (
@@ -356,7 +391,7 @@ def sample_origin(gs: GasState, pstar: float):
         rho = rhoL * (a / aL) ** (2.0 / (GAMMA - 1.0))
         p = pL * (a / aL) ** (2.0 * GAMMA / (GAMMA - 1.0))
         e = p / ((GAMMA - 1.0) * rho)
-        return rho, u, e
+        return rho, u, e, region(REGION_LEFT_FAN)
 
     def right_fan_state():
         # Right rarefaction fan state at xi = 0.
@@ -369,7 +404,7 @@ def sample_origin(gs: GasState, pstar: float):
         rho = rhoR * (a / aR) ** (2.0 / (GAMMA - 1.0))
         p = pR * (a / aR) ** (2.0 * GAMMA / (GAMMA - 1.0))
         e = p / ((GAMMA - 1.0) * rho)
-        return rho, u, e
+        return rho, u, e, region(REGION_RIGHT_FAN)
 
     def sample_left_of_contact():
         # We are left of the contact: possible states are L, L*, or left fan.
@@ -385,8 +420,8 @@ def sample_origin(gs: GasState, pstar: float):
             # xi <= SL gives original L; xi > SL gives L*.
             return jax.lax.cond(
                 xi <= SL,
-                lambda _: (rhoL, uL, eL),
-                lambda _: (rhoL_star, ustar, eL_star),
+                lambda _: state_L,
+                lambda _: state_L_star,
                 None,
             )
 
@@ -401,10 +436,10 @@ def sample_origin(gs: GasState, pstar: float):
             # xi >= STL: L*
             return jax.lax.cond(
                 xi <= SHL,
-                lambda _: (rhoL, uL, eL),
+                lambda _: state_L,
                 lambda _: jax.lax.cond(
                     xi >= STL,
-                    lambda __: (rhoL_star, ustar, eL_star),
+                    lambda __: state_L_star,
                     lambda __: left_fan_state(),
                     None,
                 ),
@@ -427,8 +462,8 @@ def sample_origin(gs: GasState, pstar: float):
             # xi <= SR gives R*; xi > SR gives original R.
             return jax.lax.cond(
                 xi <= SR,
-                lambda _: (rhoR_star, ustar, eR_star),
-                lambda _: (rhoR, uR, eR),
+                lambda _: state_R_star,
+                lambda _: state_R,
                 None,
             )
 
@@ -443,10 +478,10 @@ def sample_origin(gs: GasState, pstar: float):
             # xi >= SHR: R
             return jax.lax.cond(
                 xi <= STR,
-                lambda _: (rhoR_star, ustar, eR_star),
+                lambda _: state_R_star,
                 lambda _: jax.lax.cond(
                     xi >= SHR,
-                    lambda __: (rhoR, uR, eR),
+                    lambda __: state_R,
                     lambda __: right_fan_state(),
                     None,
                 ),
@@ -464,11 +499,12 @@ def sample_origin(gs: GasState, pstar: float):
         SHR = uR + aR                 # right rarefaction head
 
         zero = jnp.zeros_like(rhoL)
-        vacuum_state = (zero, zero, zero)  # rho = p = 0 -> flux = 0
+        # rho = p = 0 -> flux = 0
+        vacuum_state = (zero, zero, zero, region(REGION_VACUUM))
 
         return jax.lax.cond(
             xi <= SHL,
-            lambda _: (rhoL, uL, eL),
+            lambda _: state_L,
             lambda _: jax.lax.cond(
                 xi <= S_star_L,
                 lambda __: left_fan_state(),
@@ -478,7 +514,7 @@ def sample_origin(gs: GasState, pstar: float):
                     lambda ___: jax.lax.cond(
                         xi <= SHR,
                         lambda ____: right_fan_state(),
-                        lambda ____: (rhoR, uR, eR),
+                        lambda ____: state_R,
                         None,
                     ),
                     None,
@@ -497,12 +533,16 @@ def sample_origin(gs: GasState, pstar: float):
             None,
         )
 
-    return jax.lax.cond(
+    rho, u, e, region_code = jax.lax.cond(
         gs.is_vacuum,
         lambda _: sample_vacuum(),
         lambda _: sample_normal(),
         None,
     )
+
+    if return_region:
+        return rho, u, e, region_code
+    return rho, u, e
 
 def compute_flux(t, gas_state):
     pstar, _fstar = find_pstar(gas_state)
