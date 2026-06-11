@@ -10,7 +10,6 @@ this module.
 """
 
 from __future__ import annotations
-from termios import N_SLIP
 
 import jax
 
@@ -37,20 +36,80 @@ from evaluate import (  # noqa: E402
     evaluate_all,
     metric_keys_for,
 )
-from physics import find_pstar, compute_flux, compute_integrated_flux, GAS_STATE_DIM, GasState
+from physics import find_pstar, compute_flux, compute_integrated_flux, GAS_STATE_DIM, GasState, flux_from_primitive_state, GAMMA, abs_flux_jacobian_from_primitive_state
 
-FLUX_SCALE = jnp.array([1e-5, 1e-3, 1e-5])
+FLUX_SCALE_ARCSINH = jnp.array([1e-2, 1e-3, 2e-3])
+REL_EPS = jnp.array([10, 5, 50])
+
+
+def flux_scale(x: jax.Array) -> jax.Array:
+    """Per-sample, per-channel characteristic Euler flux scale (mass, momentum, energy).
+
+    Built from the average state: mass ~ rho_c a_c, momentum ~ rho_c a_c^2 (~p_c),
+    energy ~ rho_c a_c^3. Used by the diagnostics (and, optionally, as a loss floor).
+    """
+    rhoL, uL, pL = 10.0 ** x[..., 1], x[..., 2], 10.0 ** x[..., 3]
+    rhoR, uR, pR = 10.0 ** x[..., 4], x[..., 5], 10.0 ** x[..., 6]
+    rho_c = 0.5 * (rhoL + rhoR)
+    p_c = 0.5 * (pL + pR)
+    a_c = jnp.sqrt(GAMMA * p_c / rho_c)
+    v_c = a_c + jnp.maximum(jnp.abs(uL), jnp.abs(uR))
+    return jnp.stack([rho_c * v_c, rho_c * v_c ** 2, rho_c * v_c ** 3], axis=-1)
+
 
 def F_pred(F_net, x):
     """Network's prediction of Flux / t.
-
-    Raw network predicts arcsinh(F/FLUX_SCALE)
     """
+
+    # compute flux_LR
+    rhoL = 10.0**x[...,1]
+    uL = x[...,2]
+    pL = 10.0**x[...,3]
+    rhoR = 10.0**x[...,4]
+    uR = x[...,5]
+    pR = 10.0**x[...,6]
+    flux_L = flux_from_primitive_state(rhoL, uL, pL)
+    flux_R = flux_from_primitive_state(rhoR, uR, pR)
+    flux_LR = 0.5 * (flux_L + flux_R)
     
-    net_out = F_net(x)
-    ans = FLUX_SCALE * jnp.sinh(net_out)
-    
-    return ans
+    # construct U_L and U_R
+    EL = pL / (GAMMA - 1.0) + 0.5 * rhoL * uL**2
+    U_L = jnp.array([rhoL, rhoL * uL, EL])
+    ER = pR / (GAMMA - 1.0) + 0.5 * rhoR * uR**2
+    U_R = jnp.array([rhoR, rhoR * uR, ER])
+    U_RL = U_R - U_L
+
+    # construct Roe reference states
+    sL, sR = jnp.sqrt(rhoL), jnp.sqrt(rhoR)
+    HL, HR = (EL + pL) / rhoL, (ER + pR) / rhoR
+    u_tilde = (sL * uL + sR * uR) / (sL + sR)
+    H_tilde = (sL * HL + sR * HR) / (sL + sR)
+    a2_tilde = (GAMMA - 1.0) * (H_tilde - 0.5 * u_tilde**2)
+    a_tilde = jnp.sqrt(a2_tilde)
+    rho_tilde = sL * sR
+    p_tilde = rho_tilde * a2_tilde / GAMMA
+
+    D_roe = abs_flux_jacobian_from_primitive_state(rho_tilde, u_tilde, p_tilde)
+
+    # compute F_net and interpret as 3x3 matrix D, then apply to U_R - U_L
+    net_out = F_net(x)  # shape (9,)
+
+    # D_pred = D_roe + a_tilde * net_out.reshape(3, 3)
+    D_pred = net_out.reshape(3, 3)
+
+    # D = net_out.reshape(3, 3)
+    flux_D = D_pred @ U_RL
+
+    # flux_pred = jnp.sinh(flux_LR - 0.5 * flux_D) * FLUX_SCALE_ARCSINH
+    flux_pred_raw = flux_LR - 0.5 * flux_D
+
+    # flux_pred = flux_pred_raw.at[..., 1].set(10.0 ** flux_pred_raw[..., 1])
+    flux_pred = flux_pred_raw
+   
+    return flux_pred, D_pred
+
+def F_pred_nomat(F_net, x):
+    return F_pred(F_net, x)[0]
 
 
 def F_true(x: jax.Array) -> jax.Array:
@@ -79,9 +138,12 @@ class MLP(nnx.Module):
         return self.layers[-1](x).squeeze()
 
 
-def init_nn(in_dim: int, width: int = 32, depth: int = 3, out_dim: int = 1, *, seed: int = 0) -> MLP:
+def init_nn(in_dim: int, width: int = 32, depth: int = 3, out_dim: int = 9, *, seed: int = 0) -> MLP:
+    assert out_dim == 9, "out_dim must be 9"
     dims = [in_dim] + [width] * depth + [out_dim]
-    return MLP(dims, rngs=nnx.Rngs(seed))
+    net = MLP(dims, rngs=nnx.Rngs(seed))
+    net.layers[-1].kernel[...] = jnp.zeros_like(net.layers[-1].kernel[...])
+    return net
 
 
 def _build_model(arch: dict) -> MLP:
@@ -92,15 +154,24 @@ def _build_model(arch: dict) -> MLP:
 # ---------------------------------------------------------------------------
 # Sampler + training/eval bounds
 
-# (t, drho, dp, du)
-# TRAIN_BOUNDS      = jnp.array([[0., 1.0], [-0.8, 0.8], [-0.8, 0.8], [-1.0, 0.4]])
-# FULL_BOUNDS       = jnp.array([[0., 1.0], [-0.8, 0.8], [-0.8, 0.8], [-1.0, 0.4]])
-# RESTRICTED_BOUNDS = jnp.array([[0., 0.8], [-0.6, 0.6], [-0.6, 0.6], [-0.8, 0.3]])
+# (t, 
+# log10_rhoL, uL log10_pL, 
+# log10_rhoR, uR, log10_pR)
+# TRAIN_BOUNDS      = jnp.array([[0., 1.0], 
+#                                [-0.2, 0.2], [-0.1, 0.1], [-0.2, 0.2], 
+#                                [-0.2, 0.2], [-0.1, 0.1], [-0.2, 0.2]])
+# FULL_BOUNDS = TRAIN_BOUNDS
+# RESTRICTED_BOUNDS = jnp.array([[0., 0.8], 
+#                                 [-0.1, 0.1], [-0.05, 0.05], [-0.1, 0.1], 
+#                                 [-0.1, 0.1], [-0.1, 0.1], [-0.05, 0.05]])
 
-# (t, log10_rhoL, log10_pL, log10_rhoR, log10_pR, uRL)
-TRAIN_BOUNDS      = jnp.array([[0., 1.0], [-2., 2.], [-2., 2.], [-2., 2.], [-2., 2.], [-1., 1.]])
-FULL_BOUNDS       = jnp.array([[0., 1.0], [-2., 2.], [-2., 2.], [-2., 2.], [-2., 2.], [-1., 1.]])
-RESTRICTED_BOUNDS = jnp.array([[0., 0.8], [-1.5, 1.5], [-1.5, 1.5], [-1.5, 1.5], [-1.5, 1.5], [-0.8, 0.8]])
+TRAIN_BOUNDS      = jnp.array([[0., 1.0], 
+                               [-2. ,2.], [-1. ,1.], [-2. ,2.], 
+                               [-2. ,2.], [-1. ,1.], [-2. ,2.]])
+FULL_BOUNDS = TRAIN_BOUNDS
+RESTRICTED_BOUNDS = jnp.array([[0., 0.8], 
+                                [-1.5, 1.5], [-0.8, 0.8], [-1.5, 1.5], 
+                                [-1.5, 1.5], [-0.8, 0.8], [-1.5, 1.5]])
 
 
 class UniformRandomSampler:
@@ -113,7 +184,17 @@ class UniformRandomSampler:
 
 
 REGIME_LABELS = ("full", "restricted", "small_jump")
-METRIC_KEYS = metric_keys_for(REGIME_LABELS)
+
+# Diagnostic keys (per regime): loss concentration + zero-crossing tells.
+DIAG_NAMES = (
+    "top01_mass", "top01_momentum", "top01_energy",            # top-0.1% share of channel loss
+    "worst1_ratio_mass", "worst1_ratio_momentum", "worst1_ratio_energy",  # median |F|/S of worst 1%
+    "worst1_uabs", "all_uabs",                                  # |u_avg|: worst 1% vs all
+)
+
+METRIC_KEYS = metric_keys_for(REGIME_LABELS) + tuple(
+    f"diag_{name}_{label}" for label in REGIME_LABELS for name in DIAG_NAMES
+)
 
 
 
@@ -146,89 +227,133 @@ def print_metrics(m: Mapping[str, float]) -> None:
                 f"median |rel|={m[f'median_rel_{regime}_{key_name}']:.2e}  "
                 f"max |rel|={m[f'max_rel_{regime}_{key_name}']:.2e}"
             )
+        for name in ["mse", "same_norm"]:
+            tqdm.write(f"    {name:8s}: {m[f'loss_{name}_{regime}']:.2e}")
+        tqdm.write("    diagnostics (current loss):")
+        for display_name, ch in (("mass", "mass"), ("momentum", "momentum"), ("energy", "energy")):
+            tqdm.write(
+                f"      {display_name:8s}: "
+                f"top0.1%-loss={m[f'diag_top01_{ch}_{regime}']:.2f}  "
+                f"worst1%_|F|/S={m[f'diag_worst1_ratio_{ch}_{regime}']:.2e}"
+            )
+        tqdm.write(
+            f"      u@worst1%: |u|med={m[f'diag_worst1_uabs_{regime}']:.2e}  "
+            f"(all={m[f'diag_all_uabs_{regime}']:.2e})"
+        )
         tqdm.write("-" * 60)
 
 
 # ---------------------------------------------------------------------------
 # Loss
 
-def loss_on_derivative(x: jax.Array, net) -> jax.Array:
-    F = lambda r: r[..., 0] * net(r)
-    F_t_eval = jax.vmap(jax.jacfwd(F))(x)[..., 0]
+def loss_on_flux_components(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: float, lambda_same: float, lambda_asinh: float) -> jax.Array:
+    flux_pred, _D_pred = jax.vmap(lambda r: F_pred(net, r))(x)
 
-    compute_flux_of_x = lambda x: compute_flux(x[0], GasState.from_array(x[1:]))
-    flux_eval = jax.vmap(compute_flux_of_x)(x)
-    
-    # return jnp.mean(jnp.log(jnp.abs(F_t_eval/flux_eval)))
-    # return jnp.mean((jnp.log(F_t_eval) - jnp.log(flux_eval))**2)
-    
-    # return jnp.mean((jnp.arcsinh(F_t_eval / FLUX_SCALE) - jnp.arcsinh(flux_eval / FLUX_SCALE)) ** 2)
-    
-    return jnp.mean((F_t_eval - flux_eval) ** 2 / FLUX_SCALE**2)
-    
-    # err = (F_t_eval - flux_eval) / FLUX_SCALE
-    # return jnp.mean(optax.huber_loss(err, delta=1.0))
+    # used to have a term here for just norm of D
 
-def loss_on_flux(x: jax.Array, net) -> jax.Array:
-    F = lambda r: r[..., 0] * net(r)
-    F_eval = jax.vmap(F)(x)
+    # get sample where U_L=U_R where we copy U_L to U_R
+    # U_L = x[...,1:4]
+    # x_same = jnp.concatenate([x[...,0:1], U_L, U_L], axis=-1)
+    # D_same_pred = net(x_same).reshape(-1, 3, 3)
+    # D_same_true = jax.vmap(abs_flux_jacobian_from_primitive_state)(10.0**U_L[..., 0], U_L[..., 1], 10.0**U_L[..., 2])
+    # D_same_norm = jnp.mean(jnp.linalg.norm(D_same_pred - D_same_true, axis=(1,2))**2)
+    D_same_norm = 0.0
 
-    compute_integrated_flux_of_x = lambda x: compute_integrated_flux(x[0], GasState.from_array(x[1:]))
-    flux_true_eval = jax.vmap(compute_integrated_flux_of_x)(x)
+    names = ["mse", "asinh_mse", "same_norm"]
 
-    # return jnp.mean((F_eval - flux_true_eval) ** 2 / FLUX_SCALE**2)
-    num = (F_eval - flux_true_eval) ** 2
-    den = (flux_true_eval)**2 + (1)**2
+    # mse = jnp.mean((flux_pred - flux_true) ** 2)
+    mse = jnp.mean(jnp.abs(flux_pred - flux_true) ** 2 / (jnp.abs(flux_true) + 1e-2)**2)
+    # mse = 0.0
 
-    return jnp.mean(num / den)
+    asinh_flux_true = jnp.arcsinh(flux_true / FLUX_SCALE_ARCSINH)
+    asinh_flux_pred = jnp.arcsinh(flux_pred / FLUX_SCALE_ARCSINH)
+    asinh_mse = jnp.mean((asinh_flux_pred - asinh_flux_true) ** 2)
 
-def loss_on_flux_arcsinh(x: jax.Array, net, weights, lam_rel_err=0.0, rel_tol=1e-4, beta=2.5, lam_beta=0.0):
-    F_true_eval = jax.vmap(F_true)(x)
-    targets = jnp.arcsinh(F_true_eval / FLUX_SCALE)
+    return jnp.array([lambda_mse * mse, lambda_asinh * asinh_mse, lambda_same * D_same_norm]), names
 
-    return loss_on_flux_arcsinh_precomputed(x, targets, net, weights, lam_rel_err, rel_tol, beta, lam_beta)
+def loss_on_flux(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: float, lambda_same: float, lambda_asinh: float) -> jax.Array:
+    components, _names = loss_on_flux_components(x, flux_true, net, lambda_mse, lambda_same, lambda_asinh)
+    return jnp.sum(components)
 
+def loss_on_rel_flux_components(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: float, lambda_same: float, lambda_asinh: float) -> jax.Array:
+    flux_pred, D_pred = jax.vmap(lambda r: F_pred(net, r))(x)
+    names = ["mse", "asinh_mse", "same_norm"]
 
-def loss_on_flux_arcsinh_precomputed(x: jax.Array, targets, net, weights, lam_rel_err=0.0, rel_tol=1e-4, beta=2.5, lam_beta=0.0):
-    # this predicts arcsinh(F/FLUX_SCALE)
-    F_eval_arcsinh = net(x)
+    # mse = jnp.mean(jnp.abs(flux_pred - flux_true) ** 2 / (jnp.abs(flux_true) + REL_EPS)**2)
+    mse = jnp.mean(jnp.abs(flux_pred - flux_true) ** 2 / (flux_scale(x))**2)
 
-    r = F_eval_arcsinh - targets
-    mse = jnp.mean(weights[..., None] * r ** 2)
-    rel = jnp.mean( r**2 / ((targets)**2 + (rel_tol)**2))
-    
-    linf = (1.0/beta) * jsp.logsumexp(beta * jnp.abs(r))
+    asinh_flux_true = jnp.arcsinh(flux_true / FLUX_SCALE_ARCSINH)
+    asinh_flux_pred = jnp.arcsinh(flux_pred / FLUX_SCALE_ARCSINH)
+    asinh_mse = jnp.mean((asinh_flux_pred - asinh_flux_true) ** 2)
 
-    return mse + lam_rel_err * rel + lam_beta * linf
+    return jnp.array([lambda_mse * mse, lambda_asinh * asinh_mse, 0.0]), names
 
-def loss_on_flux_arcsinh_transformed(x: jax.Array, net):
-    # this predicts arcsinh(F/FLUX_SCALE)
-    F_eval_arcsinh = net(x)
-    F_eval = FLUX_SCALE * jnp.sinh(F_eval_arcsinh)
+def loss_on_rel_flux(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: float, lambda_same: float, lambda_asinh: float) -> jax.Array:
+    components, _names = loss_on_rel_flux_components(x, flux_true, net, lambda_mse, lambda_same, lambda_asinh)
+    return jnp.sum(components)
 
-    F_true_eval = jax.vmap(F_true)(x)
-    # F_true_eval_arcsinh = jnp.arcsinh(F_true_eval / FLUX_SCALE)
+loss = loss_on_rel_flux
+F_pred_fn = F_pred_nomat
+loss_by_component = loss_on_rel_flux_components
 
-    return jnp.mean((F_eval - F_true_eval) ** 2)
+def diagnostics(F_net: MLP, x: jax.Array) -> dict[str, float]:
+    """Loss-concentration and zero-crossing diagnostics for one eval batch.
 
-loss = loss_on_flux_arcsinh
+    Uses the flux_scale(x) denominator that the training loss optimizes, so it
+    characterizes the loss actually being optimized. For each channel reports:
+      - top0.1% : fraction of that channel's total loss carried by its worst
+                  0.1% of samples. Near 1 => a few points dominate the loss.
+      - worst1%_|F|/S : median |F_true|/S over the channel's worst 1% of
+                  samples. << 1 => the worst points are near-zero-flux
+                  (zero-crossings), i.e. unfittable in relative error.
+    Plus |u_avg| (median) over the worst 1% by total loss vs all samples; a
+    much smaller worst-value implicates u~0 zero-crossings.
+    """
+    flux_pred = jax.vmap(lambda r: F_pred_fn(F_net, r))(x)
+    flux_true = jax.vmap(F_true)(x)
+    S = flux_scale(x)
+
+    contrib = (flux_pred - flux_true) ** 2 / S ** 2                              # (N,3)
+    ratio = jnp.abs(flux_true) / S                                               # (N,3)
+    u_abs = jnp.abs(0.5 * (x[..., 2] + x[..., 5]))                               # (N,)
+
+    n = contrib.shape[0]
+    k01 = max(1, n // 1000)
+    k1 = max(1, n // 100)
+
+    def top_share(c):
+        return jnp.sort(c)[-k01:].sum() / c.sum()
+
+    def worst_ratio(c, r):
+        return jnp.median(r[jnp.argsort(c)[-k1:]])
+
+    worst_idx = jnp.argsort(contrib.sum(axis=1))[-k1:]
+
+    channels = ("mass", "momentum", "energy")
+    out: dict[str, float] = {}
+    for i, ch in enumerate(channels):
+        out[f"top01_{ch}"] = float(top_share(contrib[:, i]))
+        out[f"worst1_ratio_{ch}"] = float(worst_ratio(contrib[:, i], ratio[:, i]))
+    out["worst1_uabs"] = float(jnp.median(u_abs[worst_idx]))
+    out["all_uabs"] = float(jnp.median(u_abs))
+    return out
 
 
 # ---------------------------------------------------------------------------
 # Training stages
 
 @nnx.jit
-def _adam_step(F_net: MLP, opt: nnx.Optimizer, batch: jax.Array) -> jax.Array:
-    weights = jnp.ones_like(batch[..., 0])
-    loss_val, grads = nnx.value_and_grad(lambda net: loss(batch, net, weights))(F_net)
+def _adam_step(F_net: MLP, opt: nnx.Optimizer, batch: jax.Array, lambda_mse: float, lambda_same: float, lambda_asinh: float) -> jax.Array:
+    flux_true = jax.vmap(F_true)(batch)
+    loss_val, grads = nnx.value_and_grad(lambda net: loss(batch, flux_true, net, lambda_mse, lambda_same, lambda_asinh))(F_net)
     opt.update(F_net, grads)
     return loss_val
 
 
 @nnx.jit
-def _lbfgs_step(F_net: MLP, opt: nnx.Optimizer, x_batch: jax.Array, targets, weights, lam_rel_err=0.0, rel_tol=1e-4, beta=2.5, lam_beta=0.0) -> jax.Array:
+def _lbfgs_step(F_net: MLP, opt: nnx.Optimizer, x_batch: jax.Array, flux_true, lambda_mse: float, lambda_same: float, lambda_asinh: float) -> jax.Array:
     def loss_fn(m):
-        return loss_on_flux_arcsinh_precomputed(x_batch, targets, m, weights, lam_rel_err, rel_tol, beta, lam_beta)
+        return loss(x_batch, flux_true, m, lambda_mse, lambda_same, lambda_asinh)
 
     graphdef, _params, rest = nnx.split(F_net, nnx.Param, ...)
     loss_val, grads = nnx.value_and_grad(loss_fn)(F_net)
@@ -250,9 +375,20 @@ def train_adam(
     lr: float = 1e-3,
     batch_size: int = 100_000,
     seed: int = 0,
+    lambda_mse: float = 1e-2,
+    lambda_same: float = 1e-2,
+    lambda_asinh: float = 1e-2,
 ) -> None:
     print('lr:', lr)
-    opt = nnx.Optimizer(F_net, optax.adamw(lr), wrt=nnx.Param)
+    # Add gradient clipping with max_norm=1 to the optimizer
+    opt = nnx.Optimizer(
+        F_net,
+        optax.chain(
+            optax.clip_by_global_norm(1),
+            optax.adamw(lr)
+        ),
+        wrt=nnx.Param
+    )
     sampler = UniformRandomSampler()
     key = jr.PRNGKey(seed)
 
@@ -260,7 +396,7 @@ def train_adam(
     for i in pbar:
         subkey, key = jr.split(key)
         batch = sampler.draw_batch(subkey, batch_size, GAS_STATE_DIM+1, TRAIN_BOUNDS)
-        loss_val = _adam_step(F_net, opt, batch)
+        loss_val = _adam_step(F_net, opt, batch, lambda_mse, lambda_same, lambda_asinh)
         writer.record_loss(loss_val)
 
         global_step = step_offset + i
@@ -285,29 +421,19 @@ def train_lbfgs(
     flush_every: int = 100,
     batch_size: int = 2**17,
     batch_seed: int = 42,
-    lam_rel_err=0.0,
-    rel_tol=1e-4,
-    beta=2.5,
-    lam_beta=0.0,
-    reweight_after=None,
-    reweight_every=None,
+    lambda_mse: float = 1e-2,
+    lambda_same: float = 1e-2,
+    lambda_asinh: float = 1e-2,
 ) -> None:
     sampler = UniformRandomSampler()
     x_batch = sampler.draw_batch(jr.PRNGKey(batch_seed), batch_size, GAS_STATE_DIM+1, TRAIN_BOUNDS)
     opt = nnx.Optimizer(F_net, optax.lbfgs(), wrt=nnx.Param)
 
-    F_true_eval = jax.vmap(F_true)(x_batch)
-    targets = jnp.arcsinh(F_true_eval / FLUX_SCALE)
+    flux_true = jax.vmap(F_true)(x_batch)
 
     pbar = tqdm(range(1, n_steps + 1), desc="lbfgs")
-    weights = jnp.ones_like(x_batch[..., 0])
     for i in pbar:
-        
-        if reweight_after is not None and i >= reweight_after and (i-reweight_after) % reweight_every == 0:
-            F_pred_eval = jax.vmap(lambda r: F_pred(F_net, r))(x_batch)
-            weights = compute_weights(F_pred_eval, F_true_eval)
-
-        loss_val = _lbfgs_step(F_net, opt, x_batch, targets, weights, lam_rel_err, rel_tol, beta, lam_beta)
+        loss_val = _lbfgs_step(F_net, opt, x_batch, flux_true, lambda_mse, lambda_same, lambda_asinh)
         writer.record_loss(loss_val)
 
         global_step = step_offset + i
@@ -341,29 +467,31 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--skip-lbfgs", action="store_true")
     p.add_argument("--skip-adam", action="store_true")
     p.add_argument("--load-from-ckpt", type=Path, default=None)
-    p.add_argument("--lam-rel-err", type=float, default=0.0)
-    p.add_argument("--rel-tol", type=float, default=1e-4)
-    p.add_argument("--beta", type=float, default=2.5)
-    p.add_argument("--lam-beta", type=float, default=0.0)
-    p.add_argument("--reweight-after", type=int, default=None)
-    p.add_argument("--reweight-every", type=int, default=None)
+    p.add_argument("--lambda-mse", type=float, default=1.)
+    p.add_argument("--lambda-same", type=float, default=0.)
+    p.add_argument("--lambda-asinh", type=float, default=0.)
     args = p.parse_args(argv)
 
-    arch = {"in_dim": GAS_STATE_DIM+1, "width": 32, "depth": 3, "out_dim": 3}
+    arch = {"in_dim": GAS_STATE_DIM+1, "width": 32, "depth": 3, "out_dim": 9}
     N_steps = 0
     if args.load_from_ckpt is not None:
         F_net, N_ = load_latest(args.load_from_ckpt, _build_model)
         N_steps += N_
     else:
         F_net = init_nn(**arch, seed=args.seed)
+        print('F_net eval:', F_net(jnp.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5])))
 
     eval_key = jr.PRNGKey(args.eval_seed)
 
     def evaluate_fn(net: nnx.Module) -> dict[str, float]:
         regimes = make_eval_regimes(eval_key, args.eval_batch_size)
-        return evaluate_all(
-            net, F_pred_fn=F_pred, F_true_fn=F_true, regimes=regimes
+        metrics = evaluate_all(
+            net, F_pred_fn=F_pred_fn, F_true_fn=F_true, regimes=regimes, lambda_mse=args.lambda_mse, lambda_same=args.lambda_same, lambda_asinh=args.lambda_asinh, loss_by_component=loss_by_component,
         )
+        for label, x_eval in regimes.items():
+            for name, val in diagnostics(net, x_eval).items():
+                metrics[f"diag_{name}_{label}"] = val
+        return metrics
 
     writer = CheckpointWriter(
         args.ckpt_dir,
@@ -382,6 +510,9 @@ def main(argv: list[str] | None = None) -> None:
             step_offset=N_steps,
             flush_every=args.flush_every,
             lr=args.adam_lr,
+            lambda_mse=args.lambda_mse,
+            lambda_same=args.lambda_same,
+            lambda_asinh=args.lambda_asinh,
         )
         N_steps += args.adam_steps
 
@@ -393,12 +524,9 @@ def main(argv: list[str] | None = None) -> None:
             batch_size=args.lbfgs_batch_size,
             step_offset=N_steps,
             flush_every=args.flush_every,
-            lam_rel_err=args.lam_rel_err,
-            rel_tol=args.rel_tol,
-            beta=args.beta,
-            lam_beta=args.lam_beta,
-            reweight_after=args.reweight_after,
-            reweight_every=args.reweight_every,
+            lambda_mse=args.lambda_mse,
+            lambda_same=args.lambda_same,
+            lambda_asinh=args.lambda_asinh,
         )
         N_steps += args.lbfgs_steps
 
@@ -406,7 +534,7 @@ def main(argv: list[str] | None = None) -> None:
     x = jr.uniform(jr.PRNGKey(7), (8, arch["in_dim"]), minval=-0.5, maxval=0.5)
     if not jnp.allclose(F_net(x), reloaded(x)):
         raise AssertionError("checkpoint round-trip mismatch")
-    print("checkpoint round-trip OK")
+    # print("checkpoint round-trip OK")
 
 
 if __name__ == "__main__":
