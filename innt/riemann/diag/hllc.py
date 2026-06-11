@@ -20,7 +20,7 @@ jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from physics import GAMMA, flux_from_primitive_state  # noqa: E402
+from physics import GAMMA, flux_from_primitive_state, rhoL_idx, uL_idx, pL_idx, rhoR_idx, uR_idx, pR_idx  # noqa: E402
 
 _Z = (GAMMA - 1.0) / (2.0 * GAMMA)
 
@@ -166,8 +166,8 @@ def _main(N: int = 500_000) -> None:
         print(f"  {ch:8s} median={q[0]:.3g}  p99={q[1]:.3g}  p99.9={q[2]:.3g}  max={q[3]:.3g}  top0.1%-share={share:.2f}")
 
     # regime binning: input Mach + origin Mach (incl. vacuum)
-    rhoL, uL, pL = 10.0 ** x[:, 1], x[:, 2], 10.0 ** x[:, 3]
-    rhoR, uR, pR = 10.0 ** x[:, 4], x[:, 5], 10.0 ** x[:, 6]
+    rhoL, uL, pL = 10.0 ** x[:, rhoL_idx], x[:, uL_idx], 10.0 ** x[:, pL_idx]
+    rhoR, uR, pR = 10.0 ** x[:, rhoR_idx], x[:, uR_idx], 10.0 ** x[:, pR_idx]
     aL = jnp.sqrt(GAMMA * pL / rhoL); aR = jnp.sqrt(GAMMA * pR / rhoR)
     mach_in = jnp.maximum(jnp.abs(uL) / aL, jnp.abs(uR) / aR)
 

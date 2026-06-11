@@ -27,6 +27,7 @@ BETA: float = (GAMMA - 1.0) / (GAMMA + 1.0)
 MU: float = (GAMMA - 1.0) / 2.0
 
 GAS_STATE_DIM: int = 6
+rhoL_idx, uL_idx, pL_idx, rhoR_idx, uR_idx, pR_idx = 0, 1, 2, 3, 4, 5
 
 def flux_from_primitive_state(rho: float, u: float, p: float):
     E = p / (GAMMA - 1.0) + 0.5 * rho * u * u
@@ -47,12 +48,12 @@ class GasState(NamedTuple):
     @classmethod
     def from_array(cls, x):
         return cls(
-            log10_rhoL=x[..., 0],
-            uL=x[...,1],
-            log10_pL=x[..., 2],
-            log10_rhoR=x[..., 3],
-            uR=x[..., 4],
-            log10_pR=x[..., 5],
+            log10_rhoL=x[..., rhoL_idx],
+            uL=x[..., uL_idx],
+            log10_pL=x[..., pL_idx],
+            log10_rhoR=x[..., rhoR_idx],
+            uR=x[..., uR_idx],
+            log10_pR=x[..., pR_idx],
         )
     
     @classmethod

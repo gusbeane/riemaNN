@@ -32,10 +32,11 @@ from evaluate import (  # noqa: E402
     evaluate_all,
     metric_keys_for,
 )
-from physics import compute_flux, compute_integrated_flux, GAS_STATE_DIM, GasState, flux_from_primitive_state, GAMMA, abs_flux_jacobian_from_primitive_state
+from physics import compute_flux, GAS_STATE_DIM, GasState, flux_from_primitive_state, GAMMA, abs_flux_jacobian_from_primitive_state
 
 FLUX_SCALE_ARCSINH = jnp.array([1e-2, 1e-3, 2e-3])
 
+from physics import rhoL_idx, uL_idx, pL_idx, rhoR_idx, uR_idx, pR_idx
 
 def flux_scale(x: jax.Array) -> jax.Array:
     """Per-sample, per-channel characteristic Euler flux scale (mass, momentum, energy).
@@ -43,8 +44,8 @@ def flux_scale(x: jax.Array) -> jax.Array:
     Built from the average state: mass ~ rho_c a_c, momentum ~ rho_c a_c^2 (~p_c),
     energy ~ rho_c a_c^3. Used by the diagnostics (and, optionally, as a loss floor).
     """
-    rhoL, uL, pL = 10.0 ** x[..., 1], x[..., 2], 10.0 ** x[..., 3]
-    rhoR, uR, pR = 10.0 ** x[..., 4], x[..., 5], 10.0 ** x[..., 6]
+    rhoL, uL, pL = 10.0 ** x[..., rhoL_idx], x[..., uL_idx], 10.0 ** x[..., pL_idx]
+    rhoR, uR, pR = 10.0 ** x[..., rhoR_idx], x[..., uR_idx], 10.0 ** x[..., pR_idx]
     rho_c = 0.5 * (rhoL + rhoR)
     p_c = 0.5 * (pL + pR)
     a_c = jnp.sqrt(GAMMA * p_c / rho_c)
@@ -57,12 +58,12 @@ def F_pred(F_net, x):
     """
 
     # compute flux_LR
-    rhoL = 10.0**x[...,1]
-    uL = x[...,2]
-    pL = 10.0**x[...,3]
-    rhoR = 10.0**x[...,4]
-    uR = x[...,5]
-    pR = 10.0**x[...,6]
+    rhoL = 10.0**x[...,rhoL_idx]
+    uL = x[...,uL_idx]
+    pL = 10.0**x[...,pL_idx]
+    rhoR = 10.0**x[...,rhoR_idx]
+    uR = x[...,uR_idx]
+    pR = 10.0**x[...,pR_idx]
     flux_L = flux_from_primitive_state(rhoL, uL, pL)
     flux_R = flux_from_primitive_state(rhoR, uR, pR)
     flux_LR = 0.5 * (flux_L + flux_R)
@@ -91,9 +92,9 @@ def F_pred_nomat(F_net, x):
 def F_true(x: jax.Array) -> jax.Array:
     """Exact flux divided by t.
     """
-    t = x[0]
-    gs = GasState.from_array(x[1:])
-    return compute_integrated_flux(t, gs) / t
+    t = jnp.nan # not used for now
+    gs = GasState.from_array(x)
+    return compute_flux(t, gs)
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +262,7 @@ def diagnostics(F_net: MLP, x: jax.Array) -> dict[str, float]:
 
     contrib = (flux_pred - flux_true) ** 2 / S ** 2                              # (N,3)
     ratio = jnp.abs(flux_true) / S                                               # (N,3)
-    u_abs = jnp.abs(0.5 * (x[..., 2] + x[..., 5]))                               # (N,)
+    u_abs = jnp.abs(0.5 * (x[..., uL_idx] + x[..., uR_idx]))                               # (N,)
 
     n = contrib.shape[0]
     k01 = max(1, n // 1000)
@@ -341,7 +342,7 @@ def train_adam(
     pbar = tqdm(range(1, n_steps + 1), desc="adam")
     for i in pbar:
         subkey, key = jr.split(key)
-        batch = sampler.draw_batch(subkey, batch_size, GAS_STATE_DIM+1, TRAIN_BOUNDS)
+        batch = sampler.draw_batch(subkey, batch_size, GAS_STATE_DIM, TRAIN_BOUNDS)
         loss_val = _adam_step(F_net, opt, batch, lambda_mse, lambda_same, lambda_asinh)
         writer.record_loss(loss_val)
 
@@ -366,7 +367,7 @@ def train_lbfgs(
     lambda_asinh: float = 1e-2,
 ) -> None:
     sampler = UniformRandomSampler()
-    x_batch = sampler.draw_batch(jr.PRNGKey(batch_seed), batch_size, GAS_STATE_DIM+1, TRAIN_BOUNDS)
+    x_batch = sampler.draw_batch(jr.PRNGKey(batch_seed), batch_size, GAS_STATE_DIM, TRAIN_BOUNDS)
     opt = nnx.Optimizer(F_net, optax.lbfgs(), wrt=nnx.Param)
 
     flux_true = jax.vmap(F_true)(x_batch)
@@ -413,7 +414,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--reset-ckpt", action="store_true")
     args = p.parse_args(argv)
 
-    arch = {"in_dim": GAS_STATE_DIM+1, "width": 32, "depth": 3, "out_dim": 9}
+    arch = {"in_dim": GAS_STATE_DIM, "width": 32, "depth": 3, "out_dim": 9}
     N_steps = 0
     if args.load_from_ckpt is not None:
         F_net, N_ = load_latest(args.load_from_ckpt, _build_model)
