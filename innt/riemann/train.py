@@ -4,9 +4,6 @@ Adam pretrain -> L-BFGS refine. Every `flush_every` steps (default 100) and at
 the last step of each stage, append recent losses, evaluate the network on a
 set of regimes, append a metrics row, and save a versioned msgpack checkpoint.
 
-Burgers-specific code lives here. `evaluate.py` is physics-agnostic and
-`checkpoint.py` is model-agnostic; both are driven by callbacks passed from
-this module.
 """
 
 from __future__ import annotations
@@ -25,7 +22,6 @@ import jax.numpy as jnp
 import optax
 from jax import random as jr
 from tqdm import tqdm
-import jax.scipy.special as jsp
 
 # Make sibling modules importable when invoked as `python innt/burger/train.py`.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -36,10 +32,9 @@ from evaluate import (  # noqa: E402
     evaluate_all,
     metric_keys_for,
 )
-from physics import find_pstar, compute_flux, compute_integrated_flux, GAS_STATE_DIM, GasState, flux_from_primitive_state, GAMMA, abs_flux_jacobian_from_primitive_state
+from physics import compute_flux, compute_integrated_flux, GAS_STATE_DIM, GasState, flux_from_primitive_state, GAMMA, abs_flux_jacobian_from_primitive_state
 
 FLUX_SCALE_ARCSINH = jnp.array([1e-2, 1e-3, 2e-3])
-REL_EPS = jnp.array([10, 5, 50])
 
 
 def flux_scale(x: jax.Array) -> jax.Array:
@@ -79,33 +74,14 @@ def F_pred(F_net, x):
     U_R = jnp.array([rhoR, rhoR * uR, ER])
     U_RL = U_R - U_L
 
-    # construct Roe reference states
-    sL, sR = jnp.sqrt(rhoL), jnp.sqrt(rhoR)
-    HL, HR = (EL + pL) / rhoL, (ER + pR) / rhoR
-    u_tilde = (sL * uL + sR * uR) / (sL + sR)
-    H_tilde = (sL * HL + sR * HR) / (sL + sR)
-    a2_tilde = (GAMMA - 1.0) * (H_tilde - 0.5 * u_tilde**2)
-    a_tilde = jnp.sqrt(a2_tilde)
-    rho_tilde = sL * sR
-    p_tilde = rho_tilde * a2_tilde / GAMMA
-
-    D_roe = abs_flux_jacobian_from_primitive_state(rho_tilde, u_tilde, p_tilde)
-
     # compute F_net and interpret as 3x3 matrix D, then apply to U_R - U_L
     net_out = F_net(x)  # shape (9,)
+    D_pred = net_out.reshape(3, 3)  # shape (3, 3)
 
-    # D_pred = D_roe + a_tilde * net_out.reshape(3, 3)
-    D_pred = net_out.reshape(3, 3)
-
-    # D = net_out.reshape(3, 3)
     flux_D = D_pred @ U_RL
 
-    # flux_pred = jnp.sinh(flux_LR - 0.5 * flux_D) * FLUX_SCALE_ARCSINH
-    flux_pred_raw = flux_LR - 0.5 * flux_D
+    flux_pred = flux_LR - 0.5 * flux_D
 
-    # flux_pred = flux_pred_raw.at[..., 1].set(10.0 ** flux_pred_raw[..., 1])
-    flux_pred = flux_pred_raw
-   
     return flux_pred, D_pred
 
 def F_pred_nomat(F_net, x):
@@ -246,40 +222,10 @@ def print_metrics(m: Mapping[str, float]) -> None:
 # ---------------------------------------------------------------------------
 # Loss
 
-def loss_on_flux_components(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: float, lambda_same: float, lambda_asinh: float) -> jax.Array:
-    flux_pred, _D_pred = jax.vmap(lambda r: F_pred(net, r))(x)
-
-    # used to have a term here for just norm of D
-
-    # get sample where U_L=U_R where we copy U_L to U_R
-    # U_L = x[...,1:4]
-    # x_same = jnp.concatenate([x[...,0:1], U_L, U_L], axis=-1)
-    # D_same_pred = net(x_same).reshape(-1, 3, 3)
-    # D_same_true = jax.vmap(abs_flux_jacobian_from_primitive_state)(10.0**U_L[..., 0], U_L[..., 1], 10.0**U_L[..., 2])
-    # D_same_norm = jnp.mean(jnp.linalg.norm(D_same_pred - D_same_true, axis=(1,2))**2)
-    D_same_norm = 0.0
-
-    names = ["mse", "asinh_mse", "same_norm"]
-
-    # mse = jnp.mean((flux_pred - flux_true) ** 2)
-    mse = jnp.mean(jnp.abs(flux_pred - flux_true) ** 2 / (jnp.abs(flux_true) + 1e-2)**2)
-    # mse = 0.0
-
-    asinh_flux_true = jnp.arcsinh(flux_true / FLUX_SCALE_ARCSINH)
-    asinh_flux_pred = jnp.arcsinh(flux_pred / FLUX_SCALE_ARCSINH)
-    asinh_mse = jnp.mean((asinh_flux_pred - asinh_flux_true) ** 2)
-
-    return jnp.array([lambda_mse * mse, lambda_asinh * asinh_mse, lambda_same * D_same_norm]), names
-
-def loss_on_flux(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: float, lambda_same: float, lambda_asinh: float) -> jax.Array:
-    components, _names = loss_on_flux_components(x, flux_true, net, lambda_mse, lambda_same, lambda_asinh)
-    return jnp.sum(components)
-
 def loss_on_rel_flux_components(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: float, lambda_same: float, lambda_asinh: float) -> jax.Array:
     flux_pred, D_pred = jax.vmap(lambda r: F_pred(net, r))(x)
     names = ["mse", "asinh_mse", "same_norm"]
 
-    # mse = jnp.mean(jnp.abs(flux_pred - flux_true) ** 2 / (jnp.abs(flux_true) + REL_EPS)**2)
     mse = jnp.mean(jnp.abs(flux_pred - flux_true) ** 2 / (flux_scale(x))**2)
 
     asinh_flux_true = jnp.arcsinh(flux_true / FLUX_SCALE_ARCSINH)
@@ -404,13 +350,7 @@ def train_adam(
             pbar.set_description(f"adam loss={float(loss_val):.4e}")
         if global_step % flush_every == 0 or i == n_steps:
             writer.flush(global_step, "adam", F_net)
-        if i==0:
-            pbar.reset(total=n_steps-1)
 
-def compute_weights(F_pred_eval: jax.Array, F_true_eval: jax.Array, q=0.5) -> jax.Array:
-    r = jnp.abs((F_pred_eval - F_true_eval) / (F_true_eval + 1e-2))
-    w = jnp.max(r, axis=1)**q
-    return w
 
 def train_lbfgs(
     F_net: MLP,
@@ -480,7 +420,6 @@ def main(argv: list[str] | None = None) -> None:
         N_steps += N_
     else:
         F_net = init_nn(**arch, seed=args.seed)
-        print('F_net eval:', F_net(jnp.array([0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5])))
 
     eval_key = jr.PRNGKey(args.eval_seed)
 
