@@ -277,16 +277,6 @@ def loss_on_flux(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: float
 
 def loss_on_rel_flux_components(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: float, lambda_same: float, lambda_asinh: float) -> jax.Array:
     flux_pred, D_pred = jax.vmap(lambda r: F_pred(net, r))(x)
-
-#     # used to have a term here for just norm of D
-
-#     # get sample where U_L=U_R where we copy U_L to U_R
-#     U_L = x[...,1:4]
-#     x_same = jnp.concatenate([x[...,0:1], U_L, U_L], axis=-1)
-#     D_same_pred = net(x_same).reshape(-1, 3, 3)
-#     D_same_true = jax.vmap(abs_flux_jacobian_from_primitive_state)(10.0**U_L[..., 0], U_L[..., 1], 10.0**U_L[..., 2])
-#     D_same_norm = jnp.mean(jnp.linalg.norm(D_same_pred - D_same_true, axis=(1,2))**2)
-
     names = ["mse", "asinh_mse", "same_norm"]
 
     # mse = jnp.mean(jnp.abs(flux_pred - flux_true) ** 2 / (jnp.abs(flux_true) + REL_EPS)**2)
@@ -303,7 +293,8 @@ def loss_on_rel_flux(x: jax.Array, flux_true: jax.Array, net: MLP, lambda_mse: f
     return jnp.sum(components)
 
 loss = loss_on_rel_flux
-
+F_pred_fn = F_pred_nomat
+loss_by_component = loss_on_rel_flux_components
 
 def diagnostics(F_net: MLP, x: jax.Array) -> dict[str, float]:
     """Loss-concentration and zero-crossing diagnostics for one eval batch.
@@ -318,7 +309,7 @@ def diagnostics(F_net: MLP, x: jax.Array) -> dict[str, float]:
     Plus |u_avg| (median) over the worst 1% by total loss vs all samples; a
     much smaller worst-value implicates u~0 zero-crossings.
     """
-    flux_pred = jax.vmap(lambda r: F_pred_nomat(F_net, r))(x)
+    flux_pred = jax.vmap(lambda r: F_pred_fn(F_net, r))(x)
     flux_true = jax.vmap(F_true)(x)
     S = flux_scale(x)
 
@@ -495,7 +486,7 @@ def main(argv: list[str] | None = None) -> None:
     def evaluate_fn(net: nnx.Module) -> dict[str, float]:
         regimes = make_eval_regimes(eval_key, args.eval_batch_size)
         metrics = evaluate_all(
-            net, F_pred_fn=F_pred_nomat, F_true_fn=F_true, regimes=regimes, lambda_mse=args.lambda_mse, lambda_same=args.lambda_same, lambda_asinh=args.lambda_asinh, loss_by_component=loss_on_flux_components
+            net, F_pred_fn=F_pred_fn, F_true_fn=F_true, regimes=regimes, lambda_mse=args.lambda_mse, lambda_same=args.lambda_same, lambda_asinh=args.lambda_asinh, loss_by_component=loss_by_component,
         )
         for label, x_eval in regimes.items():
             for name, val in diagnostics(net, x_eval).items():
