@@ -66,24 +66,28 @@ def F_true(x: jax.Array) -> jax.Array:
 # Model
 
 class MLP(nnx.Module):
-    def __init__(self, dims, *, rngs: nnx.Rngs):
+    def __init__(self, dims, *, rngs: nnx.Rngs, last_relu: bool = False):
         self.layers = nnx.List(
             [nnx.Linear(dims[i], dims[i + 1], rngs=rngs) for i in range(len(dims) - 1)]
         )
+        self.last_relu = last_relu
 
     def __call__(self, x, activation=nnx.tanh):
         x = jnp.atleast_2d(x)
         n = len(self.layers)
         for i in range(n-1):
-            x = activation(self.layers[i](x))
+            if self.last_relu and i==n-2:
+                x = nnx.relu(self.layers[i](x))
+            else:
+                x = activation(self.layers[i](x))
 
         return self.layers[-1](x).squeeze()
 
 
 def init_nn(in_dim: int, width: int = 32, depth: int = 3, out_dim: int = 9, *,
-            zero_init_last: bool = False, seed: int = 0) -> MLP:
+            zero_init_last: bool = False, last_relu: bool = False, seed: int = 0) -> MLP:
     dims = [in_dim] + [width] * depth + [out_dim]
-    net = MLP(dims, rngs=nnx.Rngs(seed))
+    net = MLP(dims, rngs=nnx.Rngs(seed), last_relu=last_relu)
     if zero_init_last:
         net.layers[-1].kernel[...] = jnp.zeros_like(net.layers[-1].kernel[...])
     return net
@@ -137,7 +141,7 @@ def _build_model(arch: dict, *, seed: int = 0) -> MLP:
     predictor = PREDICTORS[arch["predictor"]]
     return init_nn(
         arch["in_dim"], width=arch["width"], depth=arch["depth"],
-        out_dim=predictor.out_dim, zero_init_last=predictor.zero_init_last, seed=seed,
+        out_dim=predictor.out_dim, zero_init_last=predictor.zero_init_last, seed=seed, last_relu=arch["last_relu"]
     )
 
 
@@ -196,11 +200,17 @@ def rel_flux_components(x: jax.Array, flux_pred: jax.Array, flux_true: jax.Array
 
     return {"mse": mse, "asinh_mse": asinh_mse}
 
+def mae_loss_components(x: jax.Array, flux_pred: jax.Array, flux_true: jax.Array,
+                        aux: dict) -> dict[str, jax.Array]:
+    mae = jnp.mean(jnp.abs(flux_pred - flux_true) / flux_scale(x))
+    return {"mae": mae}
+
 
 # name -> (components_fn, component names). The names are listed explicitly so
 # metric keys / CSV headers exist before any loss is evaluated.
 LOSSES = {
     "rel_flux": (rel_flux_components, ("mse", "asinh_mse")),
+    "mae_flux": (mae_loss_components, ("mae",)),
 }
 
 
@@ -432,14 +442,18 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--load-from-ckpt", type=Path, default=None)
     p.add_argument("--lambda-mse", type=float, default=1.)
     p.add_argument("--lambda-asinh", type=float, default=0.)
+    p.add_argument("--lambda-mae", type=float, default=0.)
     p.add_argument("--reset-ckpt", action="store_true")
+    p.add_argument("--last-relu", action="store_true")
+    p.add_argument("--width", type=int, default=32)
+    p.add_argument("--depth", type=int, default=3)
     args = p.parse_args(argv)
 
     predictor = PREDICTORS[args.predictor]
     loss_components, loss_names = LOSSES[args.loss]
     sampler = SAMPLERS[args.sampler](TRAIN_BOUNDS)
 
-    lambda_flags = {"mse": args.lambda_mse, "asinh_mse": args.lambda_asinh}
+    lambda_flags = {"mse": args.lambda_mse, "asinh_mse": args.lambda_asinh, "mae": args.lambda_mae}
     lambdas = {name: lambda_flags[name] for name in loss_names}
 
     train_loss = make_train_loss(predictor, loss_components, lambdas)
@@ -449,7 +463,7 @@ def main(argv: list[str] | None = None) -> None:
     # `predictor` is part of the checkpoint arch: out_dim and init are derived
     # from it on reload, so a checkpoint can't be silently reinterpreted under
     # a different parameterization.
-    arch = {"in_dim": GAS_STATE_DIM, "width": 32, "depth": 3, "predictor": args.predictor}
+    arch = {"in_dim": GAS_STATE_DIM, "width": args.width, "depth": args.depth, "predictor": args.predictor, "last_relu": args.last_relu}
     N_steps = 0
     if args.load_from_ckpt is not None:
         F_net, N_ = load_latest(args.load_from_ckpt, _build_model)
