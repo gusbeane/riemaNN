@@ -449,7 +449,7 @@ def train_lbfgs(
 # CLI
 
 def _default_ckpt_dir() -> Path:
-    return Path(__file__).resolve().parent / "checkpoints"
+    return Path(__file__).resolve().parent / "ckpts/checkpoints"
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -470,6 +470,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--lambda-mse", type=float, default=1.)
     p.add_argument("--lambda-same", type=float, default=0.)
     p.add_argument("--lambda-asinh", type=float, default=0.)
+    p.add_argument("--reset-ckpt", action="store_true")
     args = p.parse_args(argv)
 
     arch = {"in_dim": GAS_STATE_DIM+1, "width": 32, "depth": 3, "out_dim": 9}
@@ -499,6 +500,7 @@ def main(argv: list[str] | None = None) -> None:
         evaluate_fn=evaluate_fn,
         metric_keys=METRIC_KEYS,
         print_metrics_fn=print_metrics,
+        reset_ckpt=args.reset_ckpt,
     )
 
     if not args.skip_adam:

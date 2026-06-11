@@ -106,6 +106,7 @@ class CheckpointWriter:
         evaluate_fn: EvaluateFn,
         metric_keys: tuple[str, ...],
         print_metrics_fn: PrintMetricsFn | None = None,
+        reset_ckpt: bool = False,
     ):
         self.ckpt_dir = ckpt_dir
         self.arch = arch
@@ -114,8 +115,9 @@ class CheckpointWriter:
         self.print_metrics_fn = print_metrics_fn
 
         ckpt_dir.mkdir(parents=True, exist_ok=True)
-        for p in ckpt_dir.glob("F_net_*.msgpack"):
-            p.unlink()
+        if reset_ckpt:
+            for p in ckpt_dir.glob("F_net_*.msgpack"):
+                p.unlink()
         self.losses_path = ckpt_dir / "losses.txt"
         self.metrics_path = ckpt_dir / "metrics.csv"
         self.losses_path.write_text("")
