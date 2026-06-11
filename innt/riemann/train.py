@@ -205,12 +205,18 @@ def mae_loss_components(x: jax.Array, flux_pred: jax.Array, flux_true: jax.Array
     mae = jnp.mean(jnp.abs(flux_pred - flux_true) / flux_scale(x))
     return {"mae": mae}
 
+def mse_loss_components(x: jax.Array, flux_pred: jax.Array, flux_true: jax.Array,
+                        aux: dict) -> dict[str, jax.Array]:
+    mse = jnp.mean(jnp.abs(flux_pred - flux_true) ** 2)
+    return {"mse": mse}
+
 
 # name -> (components_fn, component names). The names are listed explicitly so
 # metric keys / CSV headers exist before any loss is evaluated.
 LOSSES = {
     "rel_flux": (rel_flux_components, ("mse", "asinh_mse")),
     "mae_flux": (mae_loss_components, ("mae",)),
+    "mse_flux": (mse_loss_components, ("mse",)),
 }
 
 
